@@ -1,0 +1,205 @@
+# Crypto AI Ensemble Trading System Configuration
+
+# System Configuration
+system:
+  environment: "development"  # development, staging, production
+  log_level: "INFO"
+  timezone: "UTC"
+  max_workers: 4
+  
+# Database Configuration
+database:
+  postgresql:
+    host: "localhost"
+    port: 5432
+    database: "crypto_trading"
+    username: "${DB_USERNAME}"
+    password: "${DB_PASSWORD}"
+    pool_size: 20
+    max_overflow: 30
+    
+  influxdb:
+    url: "http://localhost:8086"
+    token: "${INFLUXDB_TOKEN}"
+    org: "crypto-trading"
+    bucket: "market-data"
+    
+  redis:
+    host: "localhost"
+    port: 6379
+    password: "${REDIS_PASSWORD}"
+    db: 0
+    max_connections: 100
+
+# API Configuration
+apis:
+  helius:
+    rpc_url: "https://rpc.helius.xyz"
+    api_key: "${HELIUS_API_KEY}"
+    rate_limit: 100  # requests per second
+    
+  tradingview:
+    username: "${TRADINGVIEW_USERNAME}"
+    password: "${TRADINGVIEW_PASSWORD}"
+    
+  exchanges:
+    coinbase:
+      api_key: "${COINBASE_API_KEY}"
+      api_secret: "${COINBASE_API_SECRET}"
+      passphrase: "${COINBASE_PASSPHRASE}"
+      sandbox: true
+      
+    kraken:
+      api_key: "${KRAKEN_API_KEY}"
+      api_secret: "${KRAKEN_API_SECRET}"
+      
+  social:
+    twitter:
+      bearer_token: "${TWITTER_BEARER_TOKEN}"
+    reddit:
+      client_id: "${REDDIT_CLIENT_ID}"
+      client_secret: "${REDDIT_CLIENT_SECRET}"
+
+# AI Model Configuration
+ai_models:
+  ensemble:
+    window_size: 25  # minutes for weight updates
+    alpha: 0.077     # EMA smoothing factor (2/(25+1))
+    min_confidence: 0.6
+    max_models: 10
+    
+  models:
+    executive_auxiliary_agent:
+      enabled: true
+      priority: 1
+      memory_size: 10000
+      learning_rate: 0.0003
+      
+    cross_modal_temporal_fusion:
+      enabled: true
+      priority: 1
+      attention_heads: 8
+      hidden_size: 512
+      
+    progressive_denoising_vae:
+      enabled: true
+      priority: 1
+      latent_dim: 64
+      denoising_stages: 3
+      
+    quantile_ensemble:
+      enabled: true
+      priority: 1
+      quantiles: [0.05, 0.25, 0.5, 0.75, 0.95]
+      
+    cryptobert_sentiment:
+      enabled: true
+      priority: 2
+      model_name: "bert-base-uncased"
+      max_length: 512
+
+# Trading Configuration
+trading:
+  mode: "paper"  # paper, live
+  
+  position_sizing:
+    method: "kelly_criterion"
+    max_risk_per_trade: 0.02  # 2%
+    max_portfolio_heat: 0.10  # 10%
+    min_position_size: 10     # USD
+    max_position_size: 10000  # USD
+    
+  risk_management:
+    stop_loss_pct: 0.05       # 5%
+    take_profit_pct: 0.15     # 15%
+    max_drawdown_pct: 0.15    # 15%
+    correlation_limit: 0.7    # Maximum correlation between positions
+    
+  execution:
+    slippage_model: "linear"
+    transaction_cost: 0.001   # 0.1%
+    max_execution_time: 30    # seconds
+    
+  symbols:
+    - "BTC/USD"
+    - "ETH/USD"
+    - "SOL/USD"
+    - "ADA/USD"
+    - "DOT/USD"
+
+# Security Configuration
+security:
+  encryption:
+    algorithm: "fernet"
+    key_rotation_days: 30
+    
+  authentication:
+    jwt_secret: "${JWT_SECRET}"
+    jwt_expiry_minutes: 15
+    
+  api_keys:
+    rotation_enabled: true
+    rotation_interval_days: 30
+    
+  audit_logging:
+    enabled: true
+    retention_days: 365
+
+# Monitoring and Alerting
+monitoring:
+  prometheus:
+    enabled: true
+    port: 8000
+    
+  grafana:
+    enabled: true
+    port: 3000
+    
+  alerts:
+    slack:
+      webhook_url: "${SLACK_WEBHOOK_URL}"
+      channel: "#trading-alerts"
+      
+    email:
+      smtp_server: "${SMTP_SERVER}"
+      smtp_port: 587
+      username: "${SMTP_USERNAME}"
+      password: "${SMTP_PASSWORD}"
+      
+  health_checks:
+    interval_seconds: 30
+    timeout_seconds: 10
+    
+  performance_tracking:
+    metrics_interval: 60  # seconds
+    snapshot_interval: 300  # seconds
+
+# Backtesting Configuration
+backtesting:
+  start_date: "2022-01-01"
+  end_date: "2024-01-01"
+  initial_capital: 100000
+  timeframe: "5m"
+  
+  data_sources:
+    - "binance"
+    - "coinbase"
+    - "kraken"
+    
+  metrics:
+    - "sharpe_ratio"
+    - "calmar_ratio"
+    - "max_drawdown"
+    - "win_rate"
+    - "profit_factor"
+
+# Development Configuration
+development:
+  debug: true
+  hot_reload: true
+  test_mode: false
+  
+  logging:
+    console: true
+    file: true
+    structured: true
