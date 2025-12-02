@@ -125,7 +125,47 @@ python -m src.trading.trading_engine
 
 # Monitor system
 python -m src.utils.system_monitor
+
+# HTTP prediction bridge for external agents
+# (set ENSEMBLE_STUB=true to use the lightweight stub)
+ENSEMBLE_STUB=true API_PORT=8288 python -m project.src.api.fastapi_server
 ```
+
+### FastAPI Prediction Bridge
+
+`project/src/api/fastapi_server.py` wraps the ensemble orchestrator in a
+lightweight FastAPI service so external agents (Rust trader, MCP tools, etc.)
+can call `/predict` over HTTP.
+
+- Default host/port: `0.0.0.0:8288` (override with `API_HOST` / `API_PORT`).
+- Request body example:
+  ```json
+  {
+    "token": "BONK",
+    "features": { "momentum": 0.42, "volume": 1.8 },
+    "model": "ensemble"  // optional override
+  }
+  ```
+- Response includes `prediction`, `confidence`, `expected_return`,
+  `latency_ms`, and the raw result structure.
+- `/health` returns model counts + telemetry; `/telemetry` exposes aggregate
+  call counts and average latency for dashboards.
+
+### Sidecar Smoke Test
+
+Use `scripts/sidecar_smoke.sh` to confirm the bridge is online and returning
+predictions before pointing external agents at it:
+
+```bash
+# From project root
+scripts/sidecar_smoke.sh
+
+# Override the target endpoint if needed
+SIDECAR_URL=http://localhost:8288 scripts/sidecar_smoke.sh
+```
+
+The script pings `/health`, prints the current mode (`stub` vs `full`), and sends
+a sample `/predict` payload so you can catch regressions quickly.
 
 ## 🧪 Testing
 
