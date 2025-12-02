@@ -730,3 +730,29 @@ class CrossModalTemporalFusion(BaseModel):
                 'total': self.count_parameters()
             }
         }
+
+
+def create_cross_modal_temporal_fusion(
+    input_dim: int = 29,
+    output_dim: int = 5,
+    embed_dim: int = 256,
+    num_heads: int = 8,
+    num_layers: int = 6,
+    seq_length: int = 100,
+    modality_dims: Optional[Dict[str, int]] = None,
+    dropout: float = 0.1,
+    **kwargs,
+) -> CrossModalTemporalFusion:
+    """Factory helper so API servers can lazy-load the model."""
+
+    return CrossModalTemporalFusion(
+        input_dim=input_dim,
+        output_dim=output_dim,
+        embed_dim=embed_dim,
+        num_heads=num_heads,
+        num_layers=num_layers,
+        seq_length=seq_length,
+        modality_dims=modality_dims,
+        dropout=dropout,
+        **kwargs,
+    )

@@ -28,6 +28,20 @@ from .models.volatility_prediction.multi_modal_volatility_predictor import creat
 from ..utils.logger import system_logger, audit_logger, performance_logger
 
 
+class LightweightFallbackModel(nn.Module):
+    """Simple deterministic model used when a heavy model fails to initialize."""
+
+    def __init__(self, input_dim: int, output_dim: int = 5, name: str = "fallback"):
+        super().__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.name = name
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch = x.size(0)
+        return torch.zeros((batch, self.output_dim), device=x.device)
+
+
 class UtilityMetricCalculator:
     """Calculate utility metrics for ensemble weighting based on trading profitability."""
     
@@ -190,33 +204,45 @@ class EnsembleOrchestrator:
         system_logger.info(f"Ensemble Orchestrator initialized with {len(self.models)} models")
         
     def _initialize_models(self) -> Dict[str, Any]:
-        """Initialize all 10 AI models."""
-        models = {}
-        
-        try:
-            # Priority 1 Models
-            models['executive_auxiliary_agent'] = create_executive_auxiliary_agent(self.input_dim).to(self.device)
-            models['cross_modal_temporal_fusion'] = create_cross_modal_temporal_fusion(self.input_dim).to(self.device)
-            
-            # Priority 2 Models  
-            models['progressive_denoising_vae'] = create_progressive_denoising_vae(self.input_dim).to(self.device)
-            models['quantile_ensemble'] = create_quantile_ensemble(self.input_dim).to(self.device)
-            models['crypto_bert_sentiment'] = create_crypto_bert_sentiment(self.input_dim).to(self.device)
-            
-            # Advanced Models
-            models['temporal_fusion_transformer'] = create_temporal_fusion_transformer(self.input_dim).to(self.device)
-            models['cnn_gan_autoencoder'] = create_cnn_gan_autoencoder(self.input_dim).to(self.device)
-            models['generalized_rf_var'] = create_generalized_rf_var(self.input_dim).to(self.device)
-            models['dynamic_portfolio_optimizer'] = create_dynamic_portfolio_optimizer(self.input_dim).to(self.device)
-            models['multi_modal_volatility_predictor'] = create_multi_modal_volatility_predictor(self.input_dim).to(self.device)
-            
-            system_logger.info("All 10 AI models initialized successfully")
-            
-        except Exception as e:
-            system_logger.error(f"Error initializing models: {str(e)}")
-            raise
-            
+        """Initialize all AI models with per-model fallbacks."""
+
+        factories = [
+            ("executive_auxiliary_agent", create_executive_auxiliary_agent),
+            ("cross_modal_temporal_fusion", create_cross_modal_temporal_fusion),
+            ("progressive_denoising_vae", create_progressive_denoising_vae),
+            ("quantile_ensemble", create_quantile_ensemble),
+            ("crypto_bert_sentiment", create_crypto_bert_sentiment),
+            ("temporal_fusion_transformer", create_temporal_fusion_transformer),
+            ("cnn_gan_autoencoder", create_cnn_gan_autoencoder),
+            ("generalized_rf_var", create_generalized_rf_var),
+            ("dynamic_portfolio_optimizer", create_dynamic_portfolio_optimizer),
+            ("multi_modal_volatility_predictor", create_multi_modal_volatility_predictor),
+        ]
+
+        models: Dict[str, Any] = {}
+        for label, factory in factories:
+            models[label] = self._build_model(label, factory)
+
+        system_logger.info(
+            "Model initialization completed (fallback models substituted where necessary)"
+        )
         return models
+
+    def _build_model(self, label: str, factory) -> nn.Module:
+        try:
+            model = factory(self.input_dim)
+            if hasattr(model, "to"):
+                model = model.to(self.device)
+            return model
+        except Exception as exc:
+            system_logger.error(
+                f"Model {label} failed to initialize: {exc}", exc_info=True
+            )
+            return LightweightFallbackModel(
+                input_dim=self.input_dim,
+                output_dim=5,
+                name=f"{label}_fallback",
+            ).to(self.device)
     
     def update_weights(self):
         """Update model weights using utility-based EMA."""

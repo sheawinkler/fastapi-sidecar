@@ -577,6 +577,13 @@ def log_performance_metric(metric_name: str, value: float,
     get_logger_system().log_performance_metric(metric_name, value, context)
 
 
+# Backwards-compatible handles so legacy modules that import
+# `system_logger`/`audit_logger`/`performance_logger` continue to work.
+system_logger = get_logger("system")
+audit_logger = get_logger("audit")
+performance_logger = get_logger("performance")
+
+
 if __name__ == "__main__":
     # Example usage and testing
     async def test_logging_system():

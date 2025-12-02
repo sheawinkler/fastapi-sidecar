@@ -106,7 +106,6 @@ class BaseModel(ABC, nn.Module):
         """
         pass
     
-    @abstractmethod
     def train_model(
         self,
         train_data: torch.Tensor,
@@ -115,20 +114,13 @@ class BaseModel(ABC, nn.Module):
         val_labels: Optional[torch.Tensor] = None,
         **kwargs
     ) -> Dict[str, Any]:
+        """Train the model on provided data.
+
+        Concrete models can override this; the default implementation simply
+        reports that training is not implemented.
         """
-        Train the model on provided data.
-        
-        Args:
-            train_data: Training input data
-            train_labels: Training labels
-            val_data: Validation input data (optional)
-            val_labels: Validation labels (optional)
-            **kwargs: Additional training parameters
-            
-        Returns:
-            Training results and metrics
-        """
-        pass
+
+        raise NotImplementedError(f"{self.model_name} does not implement train_model")
     
     def predict(self, x: torch.Tensor) -> ModelOutput:
         """

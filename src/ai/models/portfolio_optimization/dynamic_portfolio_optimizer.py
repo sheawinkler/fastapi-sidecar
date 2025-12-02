@@ -251,9 +251,13 @@ class DynamicPortfolioOptimizer(BaseModel):
                 nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
-            elif isinstance(module, (nn.Conv1d, nn.BatchNorm1d)):
+            elif isinstance(module, nn.Conv1d):
                 nn.init.kaiming_normal_(module.weight)
-                if hasattr(module, 'bias') and module.bias is not None:
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.BatchNorm1d):
+                nn.init.ones_(module.weight)
+                if module.bias is not None:
                     nn.init.zeros_(module.bias)
                     
     def _prepare_asset_data(self, x: torch.Tensor) -> torch.Tensor:

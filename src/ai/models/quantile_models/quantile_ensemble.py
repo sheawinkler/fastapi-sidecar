@@ -267,6 +267,231 @@ class FunctionalQuantileEnsemble(BaseModel):
         self.logger.info(f"Initialized {self.model_name} with {self.count_parameters()} parameters")
         self.logger.info(f"Quantile levels: {self.quantile_levels}")
         self.logger.info(f"Ensemble size: {self.ensemble_size}")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through the quantile ensemble."""
+
+        weights = self.ensemble_weights(x)
+        ensemble_predictions = []
+        for member in self.quantile_regressors:
+            member_predictions = []
+            for j in range(self.n_quantiles):
+                quantile_pred = member[f"q_{j}"](x)
+                member_predictions.append(quantile_pred)
+            member_output = torch.cat(member_predictions, dim=1)
+            ensemble_predictions.append(member_output)
+
+        ensemble_stack = torch.stack(ensemble_predictions, dim=2)
+        weights_expanded = weights.unsqueeze(1).expand(-1, self.n_quantiles, -1)
+        quantile_predictions = torch.sum(ensemble_stack * weights_expanded, dim=2)
+        quantile_predictions = self.asymptotic_module.enforce_monotonicity(quantile_predictions)
+        return quantile_predictions
+
+    def predict(self, x: torch.Tensor) -> ModelOutput:
+        """Generate trading predictions based on VaR analysis."""
+
+        self.eval()
+        with torch.no_grad():
+            quantile_preds = self.forward(x)
+            signal_probs = self.var_to_signal(quantile_preds)
+            predicted_class = torch.argmax(signal_probs, dim=1)
+            risk_score = self.risk_scorer(quantile_preds)
+            quantile_dict = {q: quantile_preds[0, i].item() for i, q in enumerate(self.quantile_levels)}
+            var_95 = quantile_dict.get(0.05, 0.0)
+            var_99 = quantile_dict.get(0.01, 0.0)
+            es_95 = np.mean([v for q, v in quantile_dict.items() if q <= 0.05])
+            es_99 = np.mean([v for q, v in quantile_dict.items() if q <= 0.01])
+            tail_risk = 1.0 - (quantile_dict.get(0.95, 0.0) - quantile_dict.get(0.05, 0.0)) / (
+                quantile_dict.get(0.75, 0.0) - quantile_dict.get(0.25, 0.0) + 1e-8
+            )
+            tail_risk = max(0.0, min(1.0, tail_risk))
+            confidence = max(0.0, min(1.0, 1.0 - risk_score[0].item()))
+
+            return ModelOutput(
+                prediction=predicted_class[0].item(),
+                confidence=confidence,
+                probabilities=signal_probs[0].cpu().numpy(),
+                metadata={
+                    "var_95": var_95,
+                    "var_99": var_99,
+                    "expected_shortfall_95": es_95,
+                    "expected_shortfall_99": es_99,
+                    "tail_risk": tail_risk,
+                    "risk_score": risk_score[0].item(),
+                    "quantile_spread": quantile_dict.get(0.95, 0.0) - quantile_dict.get(0.05, 0.0),
+                    "median_prediction": quantile_dict.get(0.5, 0.0),
+                    "quantiles": quantile_dict,
+                },
+            )
+
+    def compute_quantile_result(self, x: torch.Tensor) -> QuantileResult:
+        self.eval()
+        with torch.no_grad():
+            quantile_preds = self.forward(x)
+            quantiles = {q: quantile_preds[0, i].item() for i, q in enumerate(self.quantile_levels)}
+            var_estimates = {
+                "95%": quantiles.get(0.05, 0.0),
+                "99%": quantiles.get(0.01, 0.0),
+                "90%": quantiles.get(0.1, quantiles.get(0.05, 0.0)),
+            }
+            confidence_intervals = {
+                "50%": (quantiles.get(0.25, 0.0), quantiles.get(0.75, 0.0)),
+                "90%": (quantiles.get(0.05, 0.0), quantiles.get(0.95, 0.0)),
+                "98%": (quantiles.get(0.01, 0.0), quantiles.get(0.99, 0.0)),
+            }
+            expected_shortfall = {
+                "95%": np.mean([v for q, v in quantiles.items() if q <= 0.05]) if quantiles else 0.0,
+                "99%": np.mean([v for q, v in quantiles.items() if q <= 0.01]) if quantiles else 0.0,
+            }
+            risk_score = self.risk_scorer(quantile_preds)[0].item()
+            tail_risk = 1.0 - (quantiles.get(0.95, 0.0) - quantiles.get(0.05, 0.0)) / (
+                quantiles.get(0.75, 0.0) - quantiles.get(0.25, 0.0) + 1e-8
+            )
+            tail_risk = max(0.0, min(1.0, tail_risk))
+            return QuantileResult(
+                quantiles=quantiles,
+                var_estimates=var_estimates,
+                confidence_intervals=confidence_intervals,
+                risk_score=risk_score,
+                tail_risk=tail_risk,
+                expected_shortfall=expected_shortfall,
+            )
+
+    def compute_loss(self, x: torch.Tensor, targets: torch.Tensor) -> Dict[str, torch.Tensor]:
+        quantile_preds = self.forward(x)
+        quantile_losses = []
+        for i, q in enumerate(self.quantile_levels):
+            errors = targets - quantile_preds[:, i : i + 1]
+            q_loss = torch.maximum(q * errors, (q - 1) * errors)
+            quantile_losses.append(torch.mean(q_loss))
+        quantile_loss = torch.mean(torch.stack(quantile_losses))
+        asymptotic_loss = self.asymptotic_module.asymptotic_efficiency_loss(
+            quantile_preds, targets.expand(-1, self.n_quantiles)
+        )
+        monotonicity_loss = torch.tensor(0.0, device=self.device)
+        for batch_idx in range(quantile_preds.size(0)):
+            batch_preds = quantile_preds[batch_idx]
+            diff = batch_preds[1:] - batch_preds[:-1]
+            monotonicity_loss += torch.sum(F.relu(-diff))
+        monotonicity_loss /= quantile_preds.size(0)
+        ensemble_weights = self.ensemble_weights(x)
+        eps = 1e-8
+        diversity_loss = -torch.mean(torch.sum(ensemble_weights * torch.log(ensemble_weights + eps), dim=1))
+        total_loss = quantile_loss + self.asymptotic_weight * asymptotic_loss + monotonicity_loss + diversity_loss
+        return {
+            "total": total_loss,
+            "quantile": quantile_loss,
+            "asymptotic": asymptotic_loss,
+            "monotonicity": monotonicity_loss,
+            "ensemble": diversity_loss,
+        }
+
+    def train_step(self, x: torch.Tensor, targets: torch.Tensor) -> Dict[str, float]:
+        self.train()
+        self.optimizer.zero_grad()
+        losses = self.compute_loss(x, targets)
+        losses["total"].backward()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+        self.optimizer.step()
+        loss_values = {k: v.item() for k, v in losses.items()}
+        for k, v in loss_values.items():
+            self.loss_history[k].append(v)
+        return loss_values
+
+    def evaluate_var_performance(
+        self,
+        test_data: List[Tuple[torch.Tensor, float]],
+        confidence_levels: Optional[List[float]] = None,
+    ) -> Dict[str, float]:
+        confidence_levels = confidence_levels or [0.95, 0.99]
+        self.eval()
+        results = {f"var_{int(cl * 100)}": {"violations": [], "predictions": []} for cl in confidence_levels}
+        with torch.no_grad():
+            for features, actual_return in test_data:
+                quantile_result = self.compute_quantile_result(features.unsqueeze(0))
+                for cl in confidence_levels:
+                    var_key = f"{int(cl * 100)}%"
+                    predicted_var = quantile_result.var_estimates.get(var_key, 0.0)
+                    violation = 1 if actual_return < predicted_var else 0
+                    results[f"var_{int(cl * 100)}"]["violations"].append(violation)
+        performance = {}
+        for cl in confidence_levels:
+            key = f"var_{int(cl * 100)}"
+            violations = results[key]["violations"]
+            expected = 1.0 - cl
+            actual_rate = float(np.mean(violations)) if violations else 0.0
+            n = len(violations)
+            n_violations = sum(violations)
+            if 0 < n_violations < n:
+                kupiec_stat = -2 * np.log((expected ** n_violations) * ((1 - expected) ** (n - n_violations)))
+                kupiec_stat += 2 * np.log(
+                    (actual_rate ** n_violations) * ((1 - actual_rate) ** (n - n_violations) + 1e-12)
+                )
+            else:
+                kupiec_stat = float("inf")
+            performance[f"{key}_violation_rate"] = actual_rate
+            performance[f"{key}_expected_rate"] = expected
+            performance[f"{key}_kupiec_test"] = kupiec_stat
+            performance[f"{key}_accuracy"] = 1.0 - abs(actual_rate - expected)
+        return performance
+
+    def train_model(
+        self,
+        train_data: torch.Tensor,
+        train_labels: torch.Tensor,
+        val_data: Optional[torch.Tensor] = None,
+        val_labels: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        epochs = kwargs.get("epochs", 10)
+        batch_size = kwargs.get("batch_size", 32)
+        results = {"epochs": epochs, "losses": []}
+        for _ in range(epochs):
+            epoch_losses = []
+            for i in range(0, len(train_data), batch_size):
+                batch_data = train_data[i : i + batch_size]
+                batch_labels = train_labels[i : i + batch_size]
+                losses = self.train_step(batch_data, batch_labels)
+                epoch_losses.append(losses["total"])
+            results["losses"].append(float(np.mean(epoch_losses)) if epoch_losses else 0.0)
+        return results
+
+    def get_model_info(self) -> Dict[str, Any]:
+        return {
+            "model_name": self.model_name,
+            "quantile_levels": self.quantile_levels,
+            "ensemble_size": self.ensemble_size,
+            "hidden_dimension": self.hidden_dim,
+            "functional_approach": self.use_functional_approach,
+            "asymptotic_optimality": True,
+            "var_prediction": True,
+            "expected_shortfall": True,
+            "tail_risk_assessment": True,
+            "monotonicity_constraints": True,
+            "theoretical_guarantees": "Asymptotic optimality",
+            "tested_cryptocurrencies": "105+",
+            "performance_validation": "Superior on extensive crypto datasets",
+        }
+
+
+def create_quantile_ensemble(
+    input_dim: int = 29,
+    quantile_levels: Optional[List[float]] = None,
+    hidden_dim: int = 128,
+    ensemble_size: int = 5,
+    asymptotic_weight: float = 0.1,
+    **kwargs,
+) -> FunctionalQuantileEnsemble:
+    """Factory helper expected by the ensemble orchestrator."""
+
+    return FunctionalQuantileEnsemble(
+        input_dim=input_dim,
+        quantile_levels=quantile_levels,
+        hidden_dim=hidden_dim,
+        ensemble_size=ensemble_size,
+        asymptotic_weight=asymptotic_weight,
+        **kwargs,
+    )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through quantile ensemble"""
@@ -496,102 +721,3 @@ class FunctionalQuantileEnsemble(BaseModel):
         
         return loss_values
     
-    def evaluate_var_performance(self, test_data: List[Tuple[torch.Tensor, float]],
-                                confidence_levels: List[float] = [0.95, 0.99]) -> Dict[str, float]:
-        """
-        Evaluate VaR model performance using standard risk metrics
-        
-        Args:
-            test_data: List of (features, actual_return) tuples
-            confidence_levels: VaR confidence levels to evaluate
-        
-        Returns:
-            Dictionary with performance metrics
-        """
-        self.eval()
-        results = {f'var_{int(cl*100)}': {'violations': [], 'predictions': []} 
-                  for cl in confidence_levels}
-        
-        with torch.no_grad():
-            for x, actual_return in test_data:
-                x_batch = x.unsqueeze(0)
-                quantile_result = self.compute_quantile_result(x_batch)
-                
-                for cl in confidence_levels:
-                    var_key = f'{int(cl*100)}%'
-                    predicted_var = quantile_result.var_estimates[var_key]
-                    violation = 1 if actual_return < predicted_var else 0
-                    
-                    results[f'var_{int(cl*100)}']['violations'].append(violation)
-                    results[f'var_{int(cl*100)}']['predictions'].append(predicted_var)
-        
-        # Calculate performance metrics
-        performance = {}
-        for cl in confidence_levels:
-            var_key = f'var_{int(cl*100)}'
-            violations = results[var_key]['violations']
-            expected_violations = 1.0 - cl
-            actual_violation_rate = np.mean(violations)
-            
-            # Kupiec Test statistic
-            n = len(violations)
-            n_violations = sum(violations)
-            if n_violations > 0 and n_violations < n:
-                kupiec_stat = -2 * np.log(
-                    (expected_violations ** n_violations) * 
-                    ((1 - expected_violations) ** (n - n_violations))
-                ) + 2 * np.log(
-                    (actual_violation_rate ** n_violations) * 
-                    ((1 - actual_violation_rate) ** (n - n_violations))
-                )
-            else:
-                kupiec_stat = float('inf')
-            
-            performance[f'{var_key}_violation_rate'] = actual_violation_rate
-            performance[f'{var_key}_expected_rate'] = expected_violations
-            performance[f'{var_key}_kupiec_test'] = kupiec_stat
-            performance[f'{var_key}_accuracy'] = 1.0 - abs(
-                actual_violation_rate - expected_violations
-            )
-        
-        return performance
-    
-    def train_model(self, train_data: torch.Tensor, train_labels: torch.Tensor,
-                   val_data: Optional[torch.Tensor] = None, val_labels: Optional[torch.Tensor] = None,
-                   **kwargs) -> Dict[str, Any]:
-        """Train the quantile ensemble model"""
-        epochs = kwargs.get('epochs', 10)
-        results = {'epochs': epochs, 'losses': []}
-        
-        for epoch in range(epochs):
-            epoch_losses = []
-            for i in range(0, len(train_data), 32):  # Batch size 32
-                batch_data = train_data[i:i+32]
-                batch_labels = train_labels[i:i+32]
-                
-                losses = self.train_step(batch_data, batch_labels)
-                epoch_losses.append(losses['total'])
-            
-            avg_loss = np.mean(epoch_losses)
-            results['losses'].append(avg_loss)
-            
-        return results
-    
-    def get_model_info(self) -> Dict[str, Any]:
-        """Get comprehensive model information"""
-        info = {
-            'model_name': self.model_name,
-            'quantile_levels': self.quantile_levels,
-            'ensemble_size': self.ensemble_size,
-            'hidden_dimension': self.hidden_dim,
-            'functional_approach': self.use_functional_approach,
-            'asymptotic_optimality': True,
-            'var_prediction': True,
-            'expected_shortfall': True,
-            'tail_risk_assessment': True,
-            'monotonicity_constraints': True,
-            'theoretical_guarantees': 'Asymptotic optimality',
-            'tested_cryptocurrencies': '105+',
-            'performance_validation': 'Superior on extensive crypto datasets'
-        }
-        return info

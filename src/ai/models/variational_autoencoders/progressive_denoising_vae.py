@@ -299,274 +299,224 @@ class ProgressiveDenoisingVAE(BaseModel):
         self.count_parameters = lambda: sum(p.numel() for p in self.parameters() if p.requires_grad)
         
         self.logger.info(f"Initialized {self.model_name} with {self.count_parameters()} parameters")
-    
-    def forward(self, x: torch.Tensor, return_latent: bool = False) -> VAEOutput:
-        """Forward pass through Progressive Denoising VAE"""
-        # Encode with progressive denoising
+
+    def _run_vae(self, x: torch.Tensor) -> VAEOutput:
+        """Shared helper that runs the encoder/decoder stack and returns rich context."""
+
         mu, logvar, denoising_stages, anomaly_score, pattern_confidence = self.encoder(x)
-        
-        # Sample from latent distribution
         z = self.encoder.reparameterize(mu, logvar)
-        
-        # Decode to reconstruction
         reconstruction = self.decoder(z)
-        
-        if return_latent:
-            return VAEOutput(
-                reconstruction=reconstruction,
-                mu=mu,
-                logvar=logvar,
-                latent_z=z,
-                denoising_stages=denoising_stages,
-                anomaly_score=anomaly_score,
-                pattern_confidence=pattern_confidence
-            )
-        
-        return reconstruction
-    
+        return VAEOutput(
+            reconstruction=reconstruction,
+            mu=mu,
+            logvar=logvar,
+            latent_z=z,
+            denoising_stages=denoising_stages,
+            anomaly_score=anomaly_score,
+            pattern_confidence=pattern_confidence,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """BaseModel interface: produce logits/probabilities for ensemble consumption."""
+
+        vae_output = self._run_vae(x)
+        prediction_input = torch.cat([vae_output.latent_z, vae_output.anomaly_score], dim=1)
+        return self.signal_predictor(prediction_input)
+
     def predict(self, x: torch.Tensor) -> ModelOutput:
-        """Generate trading predictions with confidence scores"""
+        """Generate trading predictions with confidence scores."""
+
         self.eval()
         with torch.no_grad():
-            # Forward pass
-            vae_output = self.forward(x, return_latent=True)
-            
-            # Combine latent representation with anomaly score for prediction
-            prediction_input = torch.cat([
-                vae_output.latent_z, 
-                vae_output.anomaly_score
-            ], dim=1)
-            
-            # Generate trading signal
-            signal_probs = self.signal_predictor(prediction_input)
+            vae_output = self._run_vae(x)
+            signal_probs = self.forward(x)
             predicted_class = torch.argmax(signal_probs, dim=1)
-            
-            # Calculate confidence
             confidence = self.confidence_estimator(vae_output.latent_z)
-            
-            # Adjust confidence based on anomaly score and pattern confidence
             anomaly_penalty = 1.0 - vae_output.anomaly_score
             pattern_boost = vae_output.pattern_confidence
-            
             final_confidence = confidence * anomaly_penalty * pattern_boost
-            
+            reconstruction_error = F.mse_loss(vae_output.reconstruction, x, reduction="mean").item()
+
             return ModelOutput(
                 prediction=predicted_class[0].item(),
                 confidence=final_confidence[0].item(),
                 probabilities=signal_probs[0].cpu().numpy(),
                 metadata={
-                    'anomaly_score': vae_output.anomaly_score[0].item(),
-                    'pattern_confidence': vae_output.pattern_confidence[0].item(),
-                    'latent_norm': torch.norm(vae_output.latent_z[0]).item(),
-                    'reconstruction_error': F.mse_loss(
-                        vae_output.reconstruction[0], x[0]
-                    ).item()
-                }
+                    "anomaly_score": vae_output.anomaly_score[0].item(),
+                    "pattern_confidence": vae_output.pattern_confidence[0].item(),
+                    "latent_norm": torch.norm(vae_output.latent_z[0]).item(),
+                    "reconstruction_error": reconstruction_error,
+                },
             )
-    
-    def compute_loss(self, x: torch.Tensor, target: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
-        """Compute VAE loss with financial pattern preservation"""
-        vae_output = self.forward(x, return_latent=True)
-        
-        # Reconstruction loss (MSE for financial data preservation)
-        reconstruction_loss = F.mse_loss(
-            vae_output.reconstruction, x, reduction='mean'
-        )
-        
-        # KL divergence loss
+
+    def compute_loss(
+        self, x: torch.Tensor, target: Optional[torch.Tensor] = None
+    ) -> Dict[str, torch.Tensor]:
+        """Compute VAE + classification losses."""
+
+        vae_output = self._run_vae(x)
+        reconstruction_loss = F.mse_loss(vae_output.reconstruction, x, reduction="mean")
         kl_loss = -0.5 * torch.sum(
             1 + vae_output.logvar - vae_output.mu.pow(2) - vae_output.logvar.exp()
         ) / x.size(0)
-        
-        # Anomaly detection loss (encourage normal samples to have low anomaly scores)
         anomaly_loss = torch.mean(vae_output.anomaly_score)
-        
-        # Total VAE loss
         vae_loss = reconstruction_loss + self.beta * kl_loss + self.gamma * anomaly_loss
-        
-        # Prediction loss (if targets provided)
+
         prediction_loss = torch.tensor(0.0, device=self.device)
         if target is not None:
-            prediction_input = torch.cat([
-                vae_output.latent_z, 
-                vae_output.anomaly_score
-            ], dim=1)
+            prediction_input = torch.cat([vae_output.latent_z, vae_output.anomaly_score], dim=1)
             signal_probs = self.signal_predictor(prediction_input)
             prediction_loss = F.cross_entropy(signal_probs, target)
-        
-        # Total loss
+
         total_loss = vae_loss + prediction_loss
-        
         return {
-            'total': total_loss,
-            'reconstruction': reconstruction_loss,
-            'kl_divergence': kl_loss,
-            'anomaly': anomaly_loss,
-            'prediction': prediction_loss
+            "total": total_loss,
+            "reconstruction": reconstruction_loss,
+            "kl_divergence": kl_loss,
+            "anomaly": anomaly_loss,
+            "prediction": prediction_loss,
         }
-    
-    def train_step(self, x: torch.Tensor, target: Optional[torch.Tensor] = None) -> Dict[str, float]:
-        """Single training step"""
+
+    def train_step(
+        self, x: torch.Tensor, target: Optional[torch.Tensor] = None
+    ) -> Dict[str, float]:
+        """Single optimization step."""
+
         self.train()
         self.optimizer.zero_grad()
-        
-        # Compute loss
         losses = self.compute_loss(x, target)
-        
-        # Backward pass
-        losses['total'].backward()
-        
-        # Gradient clipping for stability
+        losses["total"].backward()
         torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
-        
-        # Update parameters
         self.optimizer.step()
-        
-        # Track losses
         loss_values = {k: v.item() for k, v in losses.items()}
         for k, v in loss_values.items():
             self.loss_history[k].append(v)
-        
         return loss_values
-    
-    def detect_market_regime_change(self, x_sequence: torch.Tensor, 
-                                   window_size: int = 10) -> Dict[str, float]:
-        """
-        Detect market regime changes using latent space analysis
-        
-        Args:
-            x_sequence: Sequence of market data (seq_len, features)
-            window_size: Size of sliding window for regime detection
-        
-        Returns:
-            Dictionary with regime change metrics
-        """
+
+    def detect_market_regime_change(
+        self, x_sequence: torch.Tensor, window_size: int = 10
+    ) -> Dict[str, float]:
+        """Detect market regime changes using latent space analysis."""
+
         self.eval()
         with torch.no_grad():
             latent_representations = []
             anomaly_scores = []
-            
-            # Process sequence
             for i in range(len(x_sequence)):
-                x_sample = x_sequence[i:i+1]  # Add batch dimension
-                vae_output = self.forward(x_sample, return_latent=True)
+                x_sample = x_sequence[i : i + 1]
+                vae_output = self._run_vae(x_sample)
                 latent_representations.append(vae_output.latent_z[0])
                 anomaly_scores.append(vae_output.anomaly_score[0])
-            
-            # Convert to tensors
+
+            if len(latent_representations) < window_size:
+                return {"regime_change_probability": 0.0, "confidence": 0.0}
+
             latent_seq = torch.stack(latent_representations)
             anomaly_seq = torch.stack(anomaly_scores)
-            
-            # Compute regime change indicators
-            if len(latent_seq) < window_size:
-                return {'regime_change_probability': 0.0, 'confidence': 0.0}
-            
-            # Sliding window latent space distance
             distances = []
             for i in range(window_size, len(latent_seq)):
-                current_window = latent_seq[i-window_size:i]
+                current_window = latent_seq[i - window_size : i]
                 next_point = latent_seq[i]
-                
-                # Compute distance from window centroid
                 centroid = torch.mean(current_window, dim=0)
                 distance = torch.norm(next_point - centroid).item()
                 distances.append(distance)
-            
-            # Regime change probability based on distance and anomaly scores
-            if distances:
-                avg_distance = np.mean(distances)
-                distance_std = np.std(distances) if len(distances) > 1 else 1.0
-                
-                # Normalize distance
-                normalized_distance = (distances[-1] - avg_distance) / (distance_std + 1e-8)
-                
-                # Combine with anomaly score
-                recent_anomaly = anomaly_seq[-1].item()
-                
-                regime_change_prob = min(1.0, max(0.0, 
-                    0.5 * normalized_distance + 0.5 * recent_anomaly
-                ))
-                
-                confidence = 1.0 - min(1.0, distance_std / (avg_distance + 1e-8))
-                
-                return {
-                    'regime_change_probability': regime_change_prob,
-                    'confidence': confidence,
-                    'latent_distance': distances[-1],
-                    'anomaly_score': recent_anomaly,
-                    'normalized_distance': normalized_distance
-                }
-            
-            return {'regime_change_probability': 0.0, 'confidence': 0.0}
-    
-    def generate_synthetic_patterns(self, n_samples: int = 100, 
-                                   pattern_type: str = 'normal') -> torch.Tensor:
-        """
-        Generate synthetic financial patterns using the trained VAE
-        
-        Args:
-            n_samples: Number of samples to generate
-            pattern_type: Type of pattern ('normal', 'bullish', 'bearish', 'volatile')
-        
-        Returns:
-            Generated synthetic financial data
-        """
+
+            if not distances:
+                return {"regime_change_probability": 0.0, "confidence": 0.0}
+
+            avg_distance = np.mean(distances)
+            distance_std = np.std(distances) if len(distances) > 1 else 1.0
+            normalized_distance = (distances[-1] - avg_distance) / (distance_std + 1e-8)
+            recent_anomaly = anomaly_seq[-1].item()
+            regime_change_prob = min(
+                1.0, max(0.0, 0.5 * normalized_distance + 0.5 * recent_anomaly)
+            )
+            confidence = 1.0 - min(1.0, distance_std / (avg_distance + 1e-8))
+            return {
+                "regime_change_probability": regime_change_prob,
+                "confidence": confidence,
+                "latent_distance": distances[-1],
+                "anomaly_score": recent_anomaly,
+                "normalized_distance": normalized_distance,
+            }
+
+    def generate_synthetic_patterns(
+        self, n_samples: int = 100, pattern_type: str = "normal"
+    ) -> torch.Tensor:
+        """Generate synthetic financial patterns using the trained VAE."""
+
         self.eval()
         with torch.no_grad():
-            if pattern_type == 'normal':
-                # Sample from standard normal distribution
+            if pattern_type == "normal":
                 z = torch.randn(n_samples, self.latent_dim, device=self.device)
-            elif pattern_type == 'bullish':
-                # Shift latent space towards positive values
+            elif pattern_type == "bullish":
                 z = torch.randn(n_samples, self.latent_dim, device=self.device) + 0.5
-            elif pattern_type == 'bearish':
-                # Shift latent space towards negative values
+            elif pattern_type == "bearish":
                 z = torch.randn(n_samples, self.latent_dim, device=self.device) - 0.5
-            elif pattern_type == 'volatile':
-                # Increase variance for volatile patterns
+            elif pattern_type == "volatile":
                 z = torch.randn(n_samples, self.latent_dim, device=self.device) * 2.0
             else:
                 raise ValueError(f"Unknown pattern type: {pattern_type}")
-            
-            # Decode to generate synthetic data
-            synthetic_data = self.decoder(z)
-            
-            return synthetic_data
-    
-    def train_model(self, train_data: torch.Tensor, train_labels: torch.Tensor,
-                   val_data: Optional[torch.Tensor] = None, val_labels: Optional[torch.Tensor] = None,
-                   **kwargs) -> Dict[str, Any]:
-        """Train the VAE model"""
-        epochs = kwargs.get('epochs', 10)
-        results = {'epochs': epochs, 'losses': []}
-        
-        for epoch in range(epochs):
+            return self.decoder(z)
+
+    def train_model(
+        self,
+        train_data: torch.Tensor,
+        train_labels: torch.Tensor,
+        val_data: Optional[torch.Tensor] = None,
+        val_labels: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Train the VAE model with simple batching."""
+
+        epochs = kwargs.get("epochs", 10)
+        batch_size = kwargs.get("batch_size", 32)
+        results = {"epochs": epochs, "losses": []}
+        for _ in range(epochs):
             epoch_losses = []
-            for i in range(0, len(train_data), 32):  # Batch size 32
-                batch_data = train_data[i:i+32]
-                batch_labels = train_labels[i:i+32] if train_labels is not None else None
-                
+            for i in range(0, len(train_data), batch_size):
+                batch_data = train_data[i : i + batch_size]
+                batch_labels = train_labels[i : i + batch_size] if train_labels is not None else None
                 losses = self.train_step(batch_data, batch_labels)
-                epoch_losses.append(losses['total'])
-            
-            avg_loss = np.mean(epoch_losses)
-            results['losses'].append(avg_loss)
-            
+                epoch_losses.append(losses["total"])
+            results["losses"].append(float(np.mean(epoch_losses)) if epoch_losses else 0.0)
         return results
-    
+
     def get_model_info(self) -> Dict[str, Any]:
-        """Get comprehensive model information"""
-        info = {
-            'model_name': self.model_name,
-            'latent_dimension': self.latent_dim,
-            'hidden_dimensions': self.hidden_dims,
-            'beta_kl_weight': self.beta,
-            'gamma_anomaly_weight': self.gamma,
-            'denoising_stages': 3,
-            'pattern_recognition': True,
-            'anomaly_detection': True,
-            'regime_change_detection': True,
-            'synthetic_generation': True,
-            'theoretical_guarantees': True
+        """Expose metadata for monitoring endpoints."""
+
+        return {
+            "model_name": self.model_name,
+            "latent_dimension": self.latent_dim,
+            "hidden_dimensions": self.hidden_dims,
+            "beta_kl_weight": self.beta,
+            "gamma_anomaly_weight": self.gamma,
+            "denoising_stages": 3,
+            "pattern_recognition": True,
+            "anomaly_detection": True,
+            "regime_change_detection": True,
+            "synthetic_generation": True,
+            "theoretical_guarantees": True,
         }
-        return info
+
+
+def create_progressive_denoising_vae(
+    input_dim: int = 29,
+    latent_dim: int = 32,
+    hidden_dims: Optional[List[int]] = None,
+    learning_rate: float = 1e-4,
+    beta: float = 1.0,
+    gamma: float = 0.5,
+    **kwargs,
+) -> ProgressiveDenoisingVAE:
+    """Factory helper used by the ensemble orchestrator/bridge."""
+
+    return ProgressiveDenoisingVAE(
+        input_dim=input_dim,
+        latent_dim=latent_dim,
+        hidden_dims=hidden_dims,
+        learning_rate=learning_rate,
+        beta=beta,
+        gamma=gamma,
+        **kwargs,
+    )

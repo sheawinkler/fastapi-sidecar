@@ -645,3 +645,15 @@ class ExecutiveAuxiliaryAgent(BaseModel):
                 'attention_mechanism': True
             }
         }
+def create_executive_auxiliary_agent(
+    input_dim: int = 29,
+    output_dim: int = 5,
+    **kwargs,
+) -> ExecutiveAuxiliaryAgent:
+    """Factory helper expected by the ensemble orchestrator."""
+
+    return ExecutiveAuxiliaryAgent(
+        input_dim=input_dim,
+        output_dim=output_dim,
+        **kwargs,
+    )

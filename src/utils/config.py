@@ -12,7 +12,19 @@ from typing import Dict, Any, Optional, List, Union
 from pathlib import Path
 from pydantic import BaseModel, Field, validator
 from dataclasses import dataclass
-import structlog
+try:
+    import structlog  # type: ignore
+except ImportError:  # pragma: no cover - fallback when optional dep missing
+    import logging
+
+    class _StructlogShim:
+        """Minimal shim so config manager works without structlog installed."""
+
+        @staticmethod
+        def get_logger(name: Optional[str] = None):  # type: ignore[override]
+            return logging.getLogger(name or __name__)
+
+    structlog = _StructlogShim()  # type: ignore
 from datetime import datetime
 import re
 

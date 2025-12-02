@@ -687,3 +687,31 @@ class CryptoBERTSentimentFusion(BaseModel):
             'custom_tokenization': True
         }
         return info
+
+
+def create_crypto_bert_sentiment(
+    input_dim: int = 29,
+    vocab_size: int = 30000,
+    d_model: int = 768,
+    n_layers: int = 6,
+    n_heads: int = 12,
+    max_seq_length: int = 512,
+    n_platforms: int = 3,
+    learning_rate: float = 2e-5,
+    dropout: float = 0.1,
+    **kwargs,
+) -> CryptoBERTSentimentFusion:
+    """Factory helper so the FastAPI bridge can import lazily."""
+
+    return CryptoBERTSentimentFusion(
+        input_dim=input_dim,
+        vocab_size=vocab_size,
+        d_model=d_model,
+        n_layers=n_layers,
+        n_heads=n_heads,
+        max_seq_length=max_seq_length,
+        n_platforms=n_platforms,
+        learning_rate=learning_rate,
+        dropout=dropout,
+        **kwargs,
+    )
