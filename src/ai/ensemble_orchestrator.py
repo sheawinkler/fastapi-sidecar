@@ -24,6 +24,7 @@ from .models.pattern_generation.cnn_gan_autoencoder import create_cnn_gan_autoen
 from .models.random_forest.generalized_rf_var import create_generalized_rf_var
 from .models.portfolio_optimization.dynamic_portfolio_optimizer import create_dynamic_portfolio_optimizer
 from .models.volatility_prediction.multi_modal_volatility_predictor import create_multi_modal_volatility_predictor
+from .models.base_model import ModelOutput
 
 from ..utils.logger import system_logger, audit_logger, performance_logger
 
@@ -296,9 +297,12 @@ class EnsembleOrchestrator:
                     # Handle different model interfaces
                     if hasattr(model, 'predict'):
                         result = model.predict(x)
+                        # Normalize BaseModel-style outputs to dictionaries
+                        if isinstance(result, ModelOutput):
+                            result = result.to_dict()
                         prediction = result['prediction']
                         confidence = result['confidence']
-                        probabilities = result.get('probabilities', np.array([0.2]*5))
+                        probabilities = result.get('probabilities', np.array([0.2] * 5))
                     else:
                         # Fallback to forward pass
                         logits = model(x)
@@ -333,12 +337,15 @@ class EnsembleOrchestrator:
             weight = self.model_weights.get(model_name, 0.0)
             confidence = model_confidences[model_name]
             probs = model_probabilities[model_name]
+
+            # Normalize probabilities to a 1D numpy array
+            probs_arr = np.array(probs, dtype=float).reshape(-1)
             
             # Confidence-weighted ensemble
             final_weight = weight * (1 + confidence)  # Boost high-confidence predictions
             
-            if len(probs) == 5:  # Ensure correct probability dimensions
-                weighted_probs += final_weight * probs.flatten()[:5]
+            if probs_arr.size >= 5:  # Ensure correct probability dimensions
+                weighted_probs += final_weight * probs_arr[:5]
             total_weight += final_weight
             confidence_weighted_sum += weight * confidence
         

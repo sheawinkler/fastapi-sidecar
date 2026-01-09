@@ -219,8 +219,10 @@ class MultiModalVolatilityPredictor(BaseModel):
             output_dim=64
         )
         
+        # Regime detector operates on concatenated price and sentiment feature vectors.
+        # Both encoders currently emit 64-dim embeddings, so use 128 here.
         self.volatility_regime_detector = VolatilityRegimeDetector(
-            self.price_volume_dim + 64  # Price features + sentiment features
+            64 + 64
         )
         
         # Price/Volume feature extractor

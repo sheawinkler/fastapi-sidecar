@@ -46,12 +46,15 @@ class MultiScaleAttention(nn.Module):
         for i, scale in enumerate(self.scales):
             # Apply temporal pooling for different scales
             if scale > 1:
-                # Downsample for larger scales
+                # Downsample for larger scales, clamping padding to valid range
+                kernel = min(scale, seq_len)
+                stride = max(1, scale // 2)
+                padding = min(scale // 2, kernel // 2)
                 pooled_x = F.avg_pool1d(
-                    x.transpose(1, 2), 
-                    kernel_size=min(scale, seq_len),
-                    stride=max(1, scale // 2),
-                    padding=scale // 2
+                    x.transpose(1, 2),
+                    kernel_size=kernel,
+                    stride=stride,
+                    padding=padding,
                 ).transpose(1, 2)
             else:
                 pooled_x = x

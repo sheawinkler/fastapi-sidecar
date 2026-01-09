@@ -66,7 +66,7 @@ class CNNEncoder(nn.Module):
 class CNNDecoder(nn.Module):
     """CNN decoder for pattern reconstruction."""
     
-    def __init__(self, latent_dim: int, output_dim: int, seq_len: int = 50):
+    def __init__(self, latent_dim: int, output_dim: int, seq_len: int = 48):
         super().__init__()
         self.latent_dim = latent_dim
         self.output_dim = output_dim
@@ -117,7 +117,7 @@ class CNNDecoder(nn.Module):
 class Generator(nn.Module):
     """GAN Generator for synthetic pattern generation."""
     
-    def __init__(self, noise_dim: int, output_dim: int, seq_len: int = 50):
+    def __init__(self, noise_dim: int, output_dim: int, seq_len: int = 48):
         super().__init__()
         self.noise_dim = noise_dim
         self.output_dim = output_dim
@@ -179,7 +179,7 @@ class Generator(nn.Module):
 class Discriminator(nn.Module):
     """GAN Discriminator for distinguishing real from synthetic patterns."""
     
-    def __init__(self, input_dim: int, seq_len: int = 50):
+    def __init__(self, input_dim: int, seq_len: int = 48):
         super().__init__()
         self.input_dim = input_dim
         self.seq_len = seq_len
@@ -432,7 +432,7 @@ def create_cnn_gan_autoencoder(input_dim: int = 29) -> CNNGANAutoencoder:
         'input_dim': input_dim,
         'latent_dim': 64,
         'noise_dim': 100,
-        'seq_len': 50,
-        'num_classes': 5
+        'seq_len': 48,
+        'num_classes': 5,
     }
     return CNNGANAutoencoder(config)

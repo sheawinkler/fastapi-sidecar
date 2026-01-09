@@ -1,0 +1,374 @@
+2025-12-18 19:54:36 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-18 19:54:47 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-18 19:54:48 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-18 19:54:48 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-18 19:56:46 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-18 19:56:46 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-18 19:56:47 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-18 19:56:47 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-18 19:56:47 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-18 19:56:47 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-18 19:56:47 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-18 19:56:47 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-18 19:56:47 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-18 20:22:02 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-18 20:22:02 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-18 20:22:03 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-18 20:22:03 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-19 02:49:19 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:20 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:20 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:20 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:20 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:20 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-19 02:49:20 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-19 02:49:20 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-19 02:49:20 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-19 02:49:23 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:23 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:23 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:23 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:23 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:23 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-19 02:49:23 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-19 02:49:23 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-19 02:49:23 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-19 02:49:48 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:48 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:48 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:48 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:48 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:48 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-19 02:49:48 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-19 02:49:48 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-19 02:49:48 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-19 02:49:50 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:50 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:50 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:50 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:50 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-19 02:49:50 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-19 02:49:50 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-19 02:49:50 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-19 02:49:50 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-19 02:50:22 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:22 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:22 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:22 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:22 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:22 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-19 02:50:22 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-19 02:50:22 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-19 02:50:22 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-19 02:50:23 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:23 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:23 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:23 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:23 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:23 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-19 02:50:23 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-19 02:50:23 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-19 02:50:23 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-19 02:50:48 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:48 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:48 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:48 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:48 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:48 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-19 02:50:48 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-19 02:50:48 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-19 02:50:48 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-19 02:50:49 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:49 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:49 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:49 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:49 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-19 02:50:49 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-19 02:50:49 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-19 02:50:49 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-19 02:50:49 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-19 10:54:34 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-19 10:54:34 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-19 10:54:34 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-19 10:54:34 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-19 10:54:34 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-19 10:54:34 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-19 10:54:34 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-19 10:54:34 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-19 10:54:34 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-19 10:54:37 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-19 10:54:37 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-19 10:54:37 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-19 10:54:37 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-19 10:54:37 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-19 10:54:37 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-19 10:54:37 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-19 10:54:37 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-19 10:54:37 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-19 10:55:04 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:04 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:04 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:04 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:04 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:04 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-19 10:55:04 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-19 10:55:04 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-19 10:55:04 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-19 10:55:06 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:06 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:06 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:06 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:06 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:06 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-19 10:55:06 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-19 10:55:06 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-19 10:55:06 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-19 10:55:38 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:38 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:38 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:38 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:38 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:38 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-19 10:55:38 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-19 10:55:38 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-19 10:55:38 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-19 10:55:38 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:38 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:38 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:38 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:38 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-19 10:55:38 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-19 10:55:38 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-19 10:55:38 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-19 10:55:38 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-21 05:01:13 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-21 05:01:13 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-21 05:02:26 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-21 05:02:26 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-27 14:37:19 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-27 14:37:19 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-27 14:38:36 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-27 14:38:36 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-27 15:46:34 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-27 15:46:34 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-27 15:46:34 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-27 15:46:34 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-27 15:46:34 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-27 15:46:34 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-27 15:46:34 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-27 15:46:34 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-27 15:46:34 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-27 15:46:40 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-27 15:46:40 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-27 15:46:40 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-27 15:46:40 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-27 15:46:40 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-27 15:46:40 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-27 15:46:40 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-27 15:46:40 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-27 15:46:40 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-27 15:47:03 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-27 15:47:03 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-27 15:47:03 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-27 15:47:03 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-27 15:47:03 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-27 15:47:03 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-27 15:47:03 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-27 15:47:03 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-27 15:47:03 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-27 15:47:09 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-27 15:47:09 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-27 15:47:09 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-27 15:47:09 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-27 15:47:09 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-27 15:47:09 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-27 15:47:09 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-27 15:47:09 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-27 15:47:09 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-27 15:57:04 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-27 15:57:04 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-27 15:57:04 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-27 15:57:04 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-27 15:57:04 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-27 15:57:04 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-27 15:57:04 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-27 15:57:04 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-27 15:57:04 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-27 16:00:06 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-27 16:00:06 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-27 16:00:06 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-27 16:00:06 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-27 16:00:06 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-27 16:00:06 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-27 16:00:06 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-27 16:00:06 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-27 16:00:06 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-27 16:41:03 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-27 16:41:03 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-27 16:41:03 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-27 16:41:03 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-27 16:41:03 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-27 16:41:03 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-27 16:41:03 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-27 16:41:03 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-27 16:41:03 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-27 17:02:33 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-27 17:02:33 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-27 17:02:33 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-27 17:02:33 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-27 17:02:33 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-27 17:02:33 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-27 17:02:33 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-27 17:02:33 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-27 17:02:33 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-30 00:34:14 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-30 00:34:14 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-30 00:34:14 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-30 00:34:14 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-30 00:34:42 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-30 00:34:42 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-30 00:35:34 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-30 00:35:34 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-30 00:35:34 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-30 00:35:34 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-30 00:36:27 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-30 00:36:27 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-30 00:36:27 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-30 00:36:27 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-30 10:28:24 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-30 10:28:24 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-30 10:28:25 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-30 10:28:25 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-30 22:10:11 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-30 22:10:11 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-30 22:10:11 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-30 22:10:11 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-30 22:10:11 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-30 22:10:11 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-30 22:10:11 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-30 22:10:11 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-30 22:10:11 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-30 22:10:14 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-30 22:10:14 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-30 22:10:14 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-30 22:10:14 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-30 22:10:14 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-30 22:10:14 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-30 22:10:14 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-30 22:10:14 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-30 22:10:14 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-30 22:41:46 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-30 22:41:46 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-30 22:41:46 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-30 22:41:46 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-30 22:41:46 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-30 22:41:46 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-30 22:41:46 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-30 22:41:46 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-30 22:41:46 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-30 22:41:49 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-30 22:41:49 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-30 22:41:49 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-30 22:41:49 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-30 22:41:49 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-30 22:41:49 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-30 22:41:49 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-30 22:41:49 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-30 22:41:49 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-30 22:41:51 - system - ERROR - Error in model executive_auxiliary_agent: 'ModelOutput' object is not subscriptable
+2025-12-30 22:41:51 - system - ERROR - Error in model cross_modal_temporal_fusion: 'ModelOutput' object is not subscriptable
+2025-12-30 22:41:51 - system - ERROR - Error in model progressive_denoising_vae: 'ModelOutput' object is not subscriptable
+2025-12-30 22:41:51 - system - ERROR - Error in model quantile_ensemble: 'ModelOutput' object is not subscriptable
+2025-12-30 22:41:51 - system - ERROR - Error in model crypto_bert_sentiment: 'ModelOutput' object is not subscriptable
+2025-12-30 22:41:51 - system - ERROR - Error in model temporal_fusion_transformer: pad should be at most half of effective kernel size, but got pad=2, kernel_size=1 and dilation=1
+2025-12-30 22:41:51 - system - ERROR - Error in model cnn_gan_autoencoder: The size of tensor a (50) must match the size of tensor b (48) at non-singleton dimension 1
+2025-12-30 22:41:51 - system - ERROR - Error in model dynamic_portfolio_optimizer: shape '[1, 5, -1]' is invalid for input of size 29
+2025-12-30 22:41:51 - system - ERROR - Error in model multi_modal_volatility_predictor: mat1 and mat2 shapes cannot be multiplied (1x128 and 79x128)
+2025-12-31 00:03:41 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-31 00:03:41 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-31 00:10:43 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-31 00:10:43 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-31 00:10:44 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-31 00:10:44 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-31 01:23:12 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-31 01:23:12 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-31 01:23:19 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-31 01:23:19 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2025-12-31 01:23:19 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2025-12-31 01:23:19 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-01 14:14:54 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-01 14:14:54 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-01 18:16:03 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-01 18:16:03 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-01 18:16:07 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-01 18:16:07 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-01 18:16:07 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-01 18:16:07 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-01 18:16:14 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-01 18:16:14 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-01 18:16:15 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-01 18:16:15 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-03 22:03:28 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-03 22:03:28 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-03 22:03:31 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-03 22:03:31 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-03 22:03:31 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-03 22:03:31 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-03 22:03:38 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-03 22:03:38 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-03 22:03:38 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-03 22:03:38 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-04 00:11:23 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-04 00:11:23 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-04 00:11:26 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-04 00:11:26 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-04 00:11:26 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-04 00:11:26 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-04 00:11:29 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-04 00:11:29 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-04 00:11:29 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-04 00:11:29 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-05 20:59:04 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-05 20:59:04 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-05 20:59:07 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-05 20:59:07 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-05 20:59:08 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-05 20:59:08 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-05 20:59:24 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-05 20:59:24 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-05 20:59:25 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-05 20:59:25 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-06 16:02:15 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-06 16:02:15 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-06 16:02:18 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-06 16:02:18 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-06 16:02:18 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-06 16:02:18 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-06 16:02:22 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-06 16:02:22 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-06 16:02:23 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-06 16:02:23 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-07 01:35:20 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-07 01:35:20 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-07 01:35:21 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-07 01:35:21 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-07 21:05:41 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-07 21:05:41 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-07 21:05:42 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-07 21:05:42 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-07 21:14:36 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-07 21:14:36 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-07 21:14:39 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-07 21:14:39 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-07 21:14:40 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-07 21:14:40 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-07 21:14:43 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-07 21:14:43 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-07 21:14:44 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-07 21:14:44 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-08 21:01:36 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-08 21:01:36 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-08 21:01:48 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-08 21:01:48 - system - INFO - Ensemble Orchestrator initialized with 10 models
+2026-01-08 21:01:58 - system - INFO - Model initialization completed (fallback models substituted where necessary)
+2026-01-08 21:01:58 - system - INFO - Ensemble Orchestrator initialized with 10 models

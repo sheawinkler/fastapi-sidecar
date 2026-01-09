@@ -436,13 +436,24 @@ class DynamicPortfolioOptimizer(BaseModel):
 
 # Model factory function
 def create_dynamic_portfolio_optimizer(input_dim: int = 29) -> DynamicPortfolioOptimizer:
-    """Create a Dynamic Portfolio Optimizer with optimized configuration."""
+    """Create a Dynamic Portfolio Optimizer with optimized configuration.
+
+    Chooses a num_assets value that divides input_dim to avoid invalid reshapes
+    when preparing CNN input tensors.
+    """
+    # Prefer a reasonable number of assets that evenly divides input_dim
+    num_assets = 1
+    for candidate in range(min(10, input_dim), 0, -1):
+        if input_dim % candidate == 0:
+            num_assets = candidate
+            break
+
     config = {
         'input_dim': input_dim,
-        'num_assets': max(5, input_dim // 6),  # Reasonable number of assets
+        'num_assets': num_assets,
         'd_model': 256,
         'num_heads': 8,
         'sequence_length': 50,
-        'num_classes': 5
+        'num_classes': 5,
     }
     return DynamicPortfolioOptimizer(config)

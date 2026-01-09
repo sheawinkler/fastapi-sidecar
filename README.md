@@ -128,7 +128,7 @@ python -m src.utils.system_monitor
 
 # HTTP prediction bridge for external agents
 # (set ENSEMBLE_STUB=true to use the lightweight stub)
-ENSEMBLE_STUB=true API_PORT=8288 python -m project.src.api.fastapi_server
+ENSEMBLE_STUB=true API_PORT=8288 python -m src.api.fastapi_server
 ```
 
 ### FastAPI Prediction Bridge
@@ -150,6 +150,28 @@ can call `/predict` over HTTP.
   `latency_ms`, and the raw result structure.
 - `/health` returns model counts + telemetry; `/telemetry` exposes aggregate
   call counts and average latency for dashboards.
+- WebSocket guidance stream: connect to `/ws/guidance` to receive low-latency
+  guidance events (and optionally publish via `POST /guidance/publish`).
+  ```bash
+  curl -fsS -X POST http://localhost:8288/guidance/publish \
+    -H 'Content-Type: application/json' \
+    --data '{"symbol":"SOL/USDC","confidence":0.77,"score":0.66,"notes":"manual-publish"}'
+  ```
+
+### Sidecar Launch (uv)
+
+From the `project/` directory, the easiest way to bring the FastAPI sidecar up is:
+
+```bash
+# Creates/uses .venv and installs requirements via uv (pip fallback)
+scripts/sidecar_run.sh
+
+# Full ensemble mode (heavier deps, slower startup)
+ENSEMBLE_STUB=false scripts/sidecar_run.sh
+
+# Override bind address/port
+API_HOST=127.0.0.1 API_PORT=8288 scripts/sidecar_run.sh
+```
 
 ### Sidecar Smoke Test
 
