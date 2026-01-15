@@ -9,6 +9,9 @@ __pycache__/
 
 # Build artifacts
 *.log
+*.logs
+*.log.*
+*.logs.*
 tmp/
 godmode_logic/
 
@@ -18,10 +21,10 @@ models/
 # Local notebooks / archives
 *.ipynb_checkpoints
 
-# audit logs
-*.log.*
+# audit logs and log directories (any depth)
 logs/
 *logs/
 *logs/*
 *.logs/.*
 logs/*.log
+**/logs/**
