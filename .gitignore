@@ -12,9 +12,6 @@ __pycache__/
 *.logs
 *.log.*
 *.logs.*
-logs/system.log
-logs/performance.log
-logs/audit.log
 tmp/
 godmode_logic/
 
@@ -25,12 +22,6 @@ models/
 *.ipynb_checkpoints
 
 # audit logs and log directories (any depth)
-logs/
-logs /
-*logs/
-*logs/*
-*.logs/.*
-logs/*.log
 **/logs/**
 logs/**
 **logs/**
