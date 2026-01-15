@@ -23,6 +23,7 @@ models/
 
 # audit logs and log directories (any depth)
 logs/
+logs /
 *logs/
 *logs/*
 *.logs/.*
