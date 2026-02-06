@@ -185,6 +185,14 @@ class PredictResponse(BaseModel):
 
     confidence: float
     expected_return: float
+
+    # Optional guidance knobs (used by Rust SidecarGuidance). These are kept lightweight and
+    # bounded so clients can safely apply them.
+    size_multiplier: float = 1.0
+    risk_multiplier: float = 1.0
+    kelly_fraction: float = 0.02
+    notes: Optional[str] = None
+
     latency_ms: float
     model: str
     metadata: Dict[str, Any]
@@ -507,7 +515,11 @@ def _derive_predict_inputs(
 
     if features is None:
         # Treat a flat payload (common for Rust SidecarClient) as a feature dict.
-        excluded = {"token", "model", "features", "schema_version"}
+        #
+        # NOTE: `timestamp` is usually transport metadata (often epoch seconds) and can dominate
+        # model inputs when unnormalized, leading to near-constant predictions. We exclude it
+        # from the legacy feature object by default.
+        excluded = {"token", "model", "features", "schema_version", "timestamp"}
         features = {k: v for k, v in extras.items() if k not in excluded}
 
     inferred = None
@@ -907,6 +919,42 @@ async def predict(req: PredictRequest) -> PredictResponse:
         override_payload["applied_multiplier"] = override.multiplier
         metadata["signal_override"] = override_payload
 
+    # Derive lightweight guidance multipliers. These are intentionally conservative; the Rust
+    # executor applies them *after* its own risk engine.
+    side_hint: Optional[str] = None
+    if isinstance(features, dict):
+        raw_side = features.get("side") or features.get("signal_type") or features.get("action")
+        if isinstance(raw_side, str):
+            side_hint = raw_side.strip().lower()
+
+    score_clamped = max(0.0, min(1.0, float(score_value)))
+    conf_clamped = max(0.0, min(0.999, float(base_confidence)))
+
+    guidance_size_multiplier = 1.0
+    guidance_risk_multiplier = 1.0
+    guidance_kelly_fraction = 0.02
+
+    if side_hint != "sell":
+        # Size multiplier: modest +/- 20% around 1.0.
+        guidance_size_multiplier = 1.0 + (0.4 * (score_clamped - 0.5))
+        guidance_size_multiplier = max(0.8, min(1.2, guidance_size_multiplier))
+
+        # Risk multiplier: modest +/- 20% around 1.0 (blends model confidence + score).
+        guidance_risk_multiplier = 1.0 + (0.3 * (score_clamped - 0.5)) + (0.3 * (conf_clamped - 0.5))
+        guidance_risk_multiplier = max(0.8, min(1.2, guidance_risk_multiplier))
+
+        # Kelly fraction: small [0.0, 0.25] hint, blended in Rust with its own sizing.
+        guidance_kelly_fraction = 0.02 + (0.1 * score_clamped * conf_clamped)
+        guidance_kelly_fraction = max(0.0, min(0.25, guidance_kelly_fraction))
+
+    metadata["guidance"] = {
+        "basis": "pre_override",
+        "side_hint": side_hint,
+        "size_multiplier": guidance_size_multiplier,
+        "risk_multiplier": guidance_risk_multiplier,
+        "kelly_fraction": guidance_kelly_fraction,
+    }
+
     # Push a low-latency guidance event (pre-override) for subscribers.
     if token != "UNKNOWN":
         guidance = GuidancePayload(
@@ -914,6 +962,9 @@ async def predict(req: PredictRequest) -> PredictResponse:
             confidence=max(0.0, min(0.999, base_confidence)),
             score=score_value,
             expected_return=expected_return_base,
+            size_multiplier=guidance_size_multiplier,
+            risk_multiplier=guidance_risk_multiplier,
+            kelly_fraction=guidance_kelly_fraction,
             notes="predict",
         )
         asyncio.create_task(_broadcast_guidance(guidance))
@@ -926,6 +977,10 @@ async def predict(req: PredictRequest) -> PredictResponse:
         score=score_value,
         confidence=confidence_value,
         expected_return=expected_return,
+        size_multiplier=guidance_size_multiplier,
+        risk_multiplier=guidance_risk_multiplier,
+        kelly_fraction=guidance_kelly_fraction,
+        notes="predict",
         latency_ms=latency_ms,
         model=str(result.get("model", model or "ensemble")),
         metadata=metadata,
