@@ -100,6 +100,111 @@ def test_predict_dict_features_warns_legacy(sidecar_server_module):
     assert any("dropped_non_numeric_fields" in w for w in warnings)
 
 
+def test_predict_rust_sidecar_payload_uses_semantic_extraction(sidecar_server_module):
+    payload = {
+        "token": "BONK",
+        "schema_version": "v1",
+        "features": {
+            "symbol": "BONK",
+            "price": 0.00042,
+            "size": 0.8,
+            "confidence": 0.69,
+            "side": "buy",
+            "signal_type": "buy",
+            "metadata": {
+                "safety_score": 0.73,
+                "expected_edge_bps": 420.0,
+                "confidence_edge_bps": 360.0,
+                "confidence_model": {
+                    "confidence": 0.72,
+                    "legacy_confidence": 0.66,
+                    "flow": {"ws_stale_penalty": 0.11},
+                    "concentration": {"combined_penalty": 0.18},
+                },
+                "tier1": {
+                    "market_cap_usd": 25_000_000,
+                    "tvl_usd": 1_500_000,
+                    "volume_24h_usd": 4_500_000,
+                    "age_seconds": 7200,
+                    "enrichment": {
+                        "onchain_top1_holder_frac": 0.09,
+                        "onchain_top10_holder_frac": 0.41,
+                    },
+                },
+                "trade_fraction": 0.14,
+                "suggested_trade_sol": 0.45,
+                "arena_size_multiplier_applied": 1.12,
+                "ws_flow_gate": {
+                    "pass": True,
+                    "stats": {
+                        "age_secs": 14,
+                        "notional_1m_usd": 55000,
+                        "notional_5m_usd": 225000,
+                        "volume_1m": 1400,
+                        "volume_5m": 7200,
+                    },
+                },
+                "arena": {
+                    "opinions": [
+                        {"action": "buy", "score": 0.82, "confidence": 0.78},
+                        {"action": "hold", "score": 0.43, "confidence": 0.55},
+                    ]
+                },
+                "correlation": {"score": 0.17, "action": "downsize"},
+                "grinder_scalp": {"active": False},
+            },
+            "ws_flow": {
+                "age_secs": 12,
+                "notional_1m_usd": 62000,
+                "notional_5m_usd": 260000,
+                "volume_1m": 1600,
+                "volume_5m": 7600,
+            },
+        },
+    }
+
+    with TestClient(sidecar_server_module.app) as client:
+        resp = client.post("/predict", json=payload)
+        assert resp.status_code == 200
+        body = resp.json()
+
+    feature_meta = body["metadata"].get("feature", {})
+    warnings = feature_meta.get("warnings", [])
+    assert feature_meta.get("input_type") == "object"
+    assert feature_meta.get("extraction_mode") == "rust_sidecar_semantic_v1"
+    assert feature_meta.get("provided_dim") == 29
+    assert feature_meta.get("mapped_field_hits", 0) > 0
+    assert any("semantic_object_features_rust_sidecar_v1" in w for w in warnings)
+    assert not any("legacy_object_features_sorted_by_key" in w for w in warnings)
+
+
+def test_predict_flat_rust_payload_without_features_key(sidecar_server_module):
+    payload = {
+        "symbol": "BONK",
+        "price": 0.00041,
+        "size": 0.75,
+        "confidence": 0.65,
+        "side": "buy",
+        "signal_type": "buy",
+        "metadata": {
+            "safety_score": 0.7,
+            "expected_edge_bps": 300.0,
+            "confidence_model": {"confidence": 0.71, "legacy_confidence": 0.64},
+            "arena": {"opinions": [{"action": "buy", "score": 0.8, "confidence": 0.75}]},
+        },
+        "ws_flow": {"age_secs": 10, "notional_5m_usd": 180000},
+    }
+
+    with TestClient(sidecar_server_module.app) as client:
+        resp = client.post("/predict", json=payload)
+        assert resp.status_code == 200
+        body = resp.json()
+
+    assert body["metadata"].get("token") == "BONK"
+    feature_meta = body["metadata"].get("feature", {})
+    assert feature_meta.get("extraction_mode") == "rust_sidecar_semantic_v1"
+
+
 def test_feedback_writes_jsonl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ENSEMBLE_STUB", "true")
     monkeypatch.setenv("SIGNAL_CACHE_ENABLED", "false")

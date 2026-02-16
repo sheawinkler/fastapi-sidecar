@@ -21,7 +21,7 @@ import uuid
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Union
+from typing import Any, Deque, Dict, List, Optional, Tuple, Union
 
 import httpx
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -52,6 +52,8 @@ STUB_REASON = ""
 FEATURE_SCHEMA_VERSION = "v1"
 FEATURE_DIM = 29
 FEATURE_NAMES = [f"x{i}" for i in range(FEATURE_DIM)]
+
+RUST_SEMANTIC_FEATURE_VERSION = "rust_sidecar_semantic_v1"
 
 
 def _data_dir() -> Path:
@@ -474,6 +476,317 @@ def _classify_override(
     return priority, reason
 
 
+def _dig_path(payload: Any, path: str) -> Any:
+    current = payload
+    for part in path.split("."):
+        if isinstance(current, dict):
+            current = current.get(part)
+        else:
+            return None
+    return current
+
+
+def _to_optional_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        out = _coerce_float(value, "value")
+    except ValueError:
+        return None
+    if not math.isfinite(out):
+        return None
+    return float(out)
+
+
+def _to_optional_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "n", "off"}:
+            return False
+    return None
+
+
+def _clamp01(value: Optional[float]) -> float:
+    if value is None:
+        return 0.0
+    return max(0.0, min(1.0, float(value)))
+
+
+def _log_norm(value: Optional[float], scale: float) -> float:
+    if value is None or value <= 0.0:
+        return 0.0
+    safe_scale = max(scale, 1e-6)
+    return float(max(0.0, min(5.0, math.log1p(value) / safe_scale)))
+
+
+def _side_to_signal_value(payload: Dict[str, Any]) -> float:
+    raw_side = payload.get("side") or payload.get("signal_type") or payload.get("action")
+    if not isinstance(raw_side, str):
+        return 0.0
+    lowered = raw_side.strip().lower()
+    if "buy" in lowered:
+        return 1.0
+    if "sell" in lowered:
+        return -1.0
+    return 0.0
+
+
+def _looks_like_rust_sidecar_payload(payload: Dict[str, Any]) -> bool:
+    """Detect rich object payloads sent by AlgoTraderV2 Rust sidecar client."""
+
+    if not isinstance(payload, dict):
+        return False
+    signature = {"symbol", "price", "confidence", "metadata", "ws_flow", "signal_type"}
+    hits = sum(1 for key in signature if key in payload)
+    return hits >= 2 and "metadata" in payload
+
+
+def _numeric_scalar_coverage(
+    payload: Any, max_depth: int = 6, max_nodes: int = 3000
+) -> Tuple[int, int]:
+    """Count numeric-compatible scalar coverage in nested JSON payloads."""
+
+    stack: List[Tuple[Any, int]] = [(payload, 0)]
+    seen = 0
+    numeric = 0
+    total_scalars = 0
+
+    while stack and seen < max_nodes:
+        node, depth = stack.pop()
+        seen += 1
+        if depth > max_depth:
+            continue
+
+        if isinstance(node, dict):
+            for value in node.values():
+                stack.append((value, depth + 1))
+            continue
+        if isinstance(node, list):
+            for value in node:
+                stack.append((value, depth + 1))
+            continue
+
+        total_scalars += 1
+        if _to_optional_float(node) is not None:
+            numeric += 1
+
+    return numeric, total_scalars
+
+
+def _arena_opinion_stats(metadata: Dict[str, Any]) -> Dict[str, float]:
+    arena = metadata.get("arena")
+    if not isinstance(arena, dict):
+        return {
+            "buy_ratio": 0.0,
+            "sell_or_veto_ratio": 0.0,
+            "avg_score": 0.0,
+            "avg_confidence": 0.0,
+            "opinion_count": 0.0,
+        }
+
+    opinions = arena.get("opinions")
+    if not isinstance(opinions, list):
+        return {
+            "buy_ratio": 0.0,
+            "sell_or_veto_ratio": 0.0,
+            "avg_score": 0.0,
+            "avg_confidence": 0.0,
+            "opinion_count": 0.0,
+        }
+
+    buy = 0
+    sell_or_veto = 0
+    scored: List[float] = []
+    confident: List[float] = []
+
+    for item in opinions:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action", "")).strip().lower()
+        if action == "buy":
+            buy += 1
+        elif action in {"sell", "veto"}:
+            sell_or_veto += 1
+
+        score = _to_optional_float(item.get("score"))
+        if score is not None:
+            scored.append(score)
+
+        conf = _to_optional_float(item.get("confidence"))
+        if conf is not None:
+            confident.append(conf)
+
+    total = len(opinions)
+    buy_ratio = (buy / total) if total else 0.0
+    sell_or_veto_ratio = (sell_or_veto / total) if total else 0.0
+    avg_score = (sum(scored) / len(scored)) if scored else 0.0
+    avg_conf = (sum(confident) / len(confident)) if confident else 0.0
+
+    return {
+        "buy_ratio": float(max(0.0, min(1.0, buy_ratio))),
+        "sell_or_veto_ratio": float(max(0.0, min(1.0, sell_or_veto_ratio))),
+        "avg_score": float(avg_score),
+        "avg_confidence": float(max(0.0, min(1.0, avg_conf))),
+        "opinion_count": float(total),
+    }
+
+
+def _correlation_action_value(metadata: Dict[str, Any]) -> float:
+    action = _dig_path(metadata, "correlation.action")
+    if not isinstance(action, str):
+        return 0.0
+    lowered = action.strip().lower()
+    if lowered == "skip":
+        return -1.0
+    if lowered == "downsize":
+        return -0.5
+    if lowered == "none":
+        return 0.0
+    return 0.0
+
+
+def _build_rust_semantic_feature_vector(payload: Dict[str, Any]) -> Tuple[List[float], Dict[str, Any]]:
+    """Project rich Rust sidecar objects into a stable 29-float feature vector."""
+
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    def pick_float(paths: List[str]) -> Optional[float]:
+        for path in paths:
+            value = _to_optional_float(_dig_path(payload, path))
+            if value is not None:
+                return value
+        return None
+
+    raw_fields: Dict[str, Optional[float]] = {
+        "price": pick_float(["price"]),
+        "size": pick_float(["size"]),
+        "base_confidence": pick_float(["confidence"]),
+        "safety_score": pick_float(["metadata.safety_score"]),
+        "model_confidence": pick_float(["metadata.confidence_model.confidence"]),
+        "legacy_confidence": pick_float(["metadata.confidence_model.legacy_confidence"]),
+        "expected_edge_bps": pick_float(["metadata.expected_edge_bps"]),
+        "confidence_edge_bps": pick_float(["metadata.confidence_edge_bps"]),
+        "ws_age_secs": pick_float(["ws_flow.age_secs", "metadata.ws_flow_gate.stats.age_secs"]),
+        "ws_notional_1m_usd": pick_float(
+            ["ws_flow.notional_1m_usd", "metadata.ws_flow_gate.stats.notional_1m_usd"]
+        ),
+        "ws_notional_5m_usd": pick_float(
+            ["ws_flow.notional_5m_usd", "metadata.ws_flow_gate.stats.notional_5m_usd"]
+        ),
+        "ws_volume_1m": pick_float(["ws_flow.volume_1m", "metadata.ws_flow_gate.stats.volume_1m"]),
+        "ws_volume_5m": pick_float(["ws_flow.volume_5m", "metadata.ws_flow_gate.stats.volume_5m"]),
+        "ws_stale_penalty": pick_float(["metadata.confidence_model.flow.ws_stale_penalty"]),
+        "concentration_penalty": pick_float(
+            ["metadata.confidence_model.concentration.combined_penalty"]
+        ),
+        "top1_holder_frac": pick_float(
+            ["metadata.tier1.enrichment.onchain_top1_holder_frac"]
+        ),
+        "top10_holder_frac": pick_float(
+            ["metadata.tier1.enrichment.onchain_top10_holder_frac"]
+        ),
+        "market_cap_usd": pick_float(["metadata.tier1.market_cap_usd"]),
+        "tvl_usd": pick_float(["metadata.tier1.tvl_usd"]),
+        "volume_24h_usd": pick_float(["metadata.tier1.volume_24h_usd"]),
+        "age_seconds": pick_float(["metadata.tier1.age_seconds"]),
+        "trade_fraction": pick_float(["metadata.trade_fraction"]),
+        "suggested_trade_sol": pick_float(["metadata.suggested_trade_sol"]),
+        "arena_size_multiplier_applied": pick_float(
+            ["metadata.arena_size_multiplier_applied", "metadata.arena.applied_size_multiplier"]
+        ),
+        "correlation_score": pick_float(["metadata.correlation.score"]),
+    }
+
+    ws_pass_bool = _to_optional_bool(_dig_path(metadata, "ws_flow_gate.pass"))
+    buy_gate_pass_bool = _to_optional_bool(_dig_path(metadata, "birdeye_ws_buy_gate.pass"))
+    grinder_active_bool = _to_optional_bool(_dig_path(metadata, "grinder_scalp.active"))
+    bucket0_active_bool = _to_optional_bool(_dig_path(metadata, "trade_sizing.bucket0_active"))
+
+    arena_stats = _arena_opinion_stats(metadata)
+    mapped_hits = sum(1 for value in raw_fields.values() if value is not None)
+    mapped_total = len(raw_fields)
+    mapped_coverage = (mapped_hits / mapped_total) if mapped_total else 0.0
+
+    numeric_scalars, total_scalars = _numeric_scalar_coverage(payload)
+    numeric_ratio = (numeric_scalars / total_scalars) if total_scalars else 0.0
+
+    side_signal = _side_to_signal_value(payload)
+    correlation_action_value = _correlation_action_value(metadata)
+
+    features = [
+        _log_norm(raw_fields["price"], scale=2.0),
+        _log_norm(raw_fields["size"], scale=2.0),
+        _clamp01(raw_fields["base_confidence"]),
+        side_signal,
+        _clamp01(raw_fields["safety_score"]),
+        _clamp01(raw_fields["model_confidence"]),
+        _clamp01(raw_fields["legacy_confidence"]),
+        float(max(-5.0, min(5.0, (raw_fields["expected_edge_bps"] or 0.0) / 1000.0))),
+        float(max(-5.0, min(5.0, (raw_fields["confidence_edge_bps"] or 0.0) / 1000.0))),
+        float(1.0 / (1.0 + max(0.0, (raw_fields["ws_age_secs"] or 0.0) / 60.0))),
+        _log_norm(raw_fields["ws_notional_1m_usd"], scale=8.0),
+        _log_norm(raw_fields["ws_notional_5m_usd"], scale=8.0),
+        _log_norm(raw_fields["ws_volume_1m"], scale=6.0),
+        _log_norm(raw_fields["ws_volume_5m"], scale=6.0),
+        _clamp01(raw_fields["ws_stale_penalty"]),
+        _clamp01(raw_fields["concentration_penalty"]),
+        _clamp01(raw_fields["top1_holder_frac"]),
+        _clamp01(raw_fields["top10_holder_frac"]),
+        _log_norm(raw_fields["market_cap_usd"], scale=12.0),
+        _log_norm(raw_fields["tvl_usd"], scale=10.0),
+        _log_norm(raw_fields["volume_24h_usd"], scale=11.0),
+        float(
+            max(
+                0.0,
+                min(1.0, ((raw_fields["age_seconds"] or 0.0) / 86_400.0) / 30.0),
+            )
+        ),
+        _clamp01(raw_fields["trade_fraction"]),
+        _log_norm(raw_fields["suggested_trade_sol"], scale=1.5),
+        float((raw_fields["arena_size_multiplier_applied"] or 1.0) - 1.0),
+        float(arena_stats["buy_ratio"] - arena_stats["sell_or_veto_ratio"]),
+        float(arena_stats["avg_confidence"]),
+        float(max(-1.0, min(1.0, raw_fields["correlation_score"] or 0.0))),
+        float(max(0.0, min(1.0, 0.5 * mapped_coverage + 0.5 * numeric_ratio))),
+    ]
+
+    diagnostics: Dict[str, Any] = {
+        "input_type": "object",
+        "provided_dim": len(features),
+        "extraction_mode": RUST_SEMANTIC_FEATURE_VERSION,
+        "mapped_field_hits": mapped_hits,
+        "mapped_field_total": mapped_total,
+        "mapped_field_coverage": round(mapped_coverage, 6),
+        "source_numeric_scalars": numeric_scalars,
+        "source_scalar_values": total_scalars,
+        "source_numeric_ratio": round(numeric_ratio, 6),
+        "semantic_flags": {
+            "ws_flow_gate_pass": bool(ws_pass_bool),
+            "birdeye_ws_buy_gate_pass": bool(buy_gate_pass_bool),
+            "grinder_scalp_active": bool(grinder_active_bool),
+            "bucket0_active": bool(bucket0_active_bool),
+            "correlation_action": correlation_action_value,
+        },
+        "arena": {
+            "opinion_count": int(arena_stats["opinion_count"]),
+            "buy_ratio": arena_stats["buy_ratio"],
+            "sell_or_veto_ratio": arena_stats["sell_or_veto_ratio"],
+            "avg_score": arena_stats["avg_score"],
+            "avg_confidence": arena_stats["avg_confidence"],
+        },
+    }
+
+    return features, diagnostics
+
+
 def _coerce_float(value: Any, label: str) -> float:
     if isinstance(value, bool):
         return 1.0 if value else 0.0
@@ -580,32 +893,41 @@ def _prepare_feature_vector(
     meta: Dict[str, Any] = {}
 
     if isinstance(payload, dict):
-        numeric = _filter_numeric_features(payload)
-        dropped = len(payload) - len(numeric)
-        if dropped:
-            warnings.append(f"dropped_non_numeric_fields:{dropped}")
-        if not numeric:
-            raise ValueError("Feature object contains no numeric values")
+        if _looks_like_rust_sidecar_payload(payload):
+            raw, semantic_meta = _build_rust_semantic_feature_vector(payload)
+            provided_dim = len(raw)
+            vector = _resize_vector(raw, expected_dim)
+            warnings.append("semantic_object_features_rust_sidecar_v1")
+            meta.update(semantic_meta)
+            meta["provided_dim"] = provided_dim
+        else:
+            numeric = _filter_numeric_features(payload)
+            dropped = len(payload) - len(numeric)
+            if dropped:
+                warnings.append(f"dropped_non_numeric_fields:{dropped}")
+            if not numeric:
+                raise ValueError("Feature object contains no numeric values")
 
-        # NOTE: legacy path — dicts are flattened by sorted keys, not a semantic schema.
-        warnings.append("legacy_object_features_sorted_by_key")
-        keys_sorted = sorted(numeric.keys())
-        keys_hash = hashlib.sha256(
-            json.dumps(keys_sorted, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
+            # NOTE: legacy path — dicts are flattened by sorted keys, not a semantic schema.
+            warnings.append("legacy_object_features_sorted_by_key")
+            keys_sorted = sorted(numeric.keys())
+            keys_hash = hashlib.sha256(
+                json.dumps(keys_sorted, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
 
-        raw = _flatten_features(numeric)
-        provided_dim = len(raw)
-        vector = _resize_vector(raw, expected_dim)
+            raw = _flatten_features(numeric)
+            provided_dim = len(raw)
+            vector = _resize_vector(raw, expected_dim)
 
-        meta.update(
-            {
-                "input_type": "object",
-                "provided_dim": provided_dim,
-                "key_count": len(keys_sorted),
-                "keys_hash": keys_hash,
-            }
-        )
+            meta.update(
+                {
+                    "input_type": "object",
+                    "provided_dim": provided_dim,
+                    "key_count": len(keys_sorted),
+                    "keys_hash": keys_hash,
+                    "extraction_mode": "legacy_sorted_numeric_keys_v1",
+                }
+            )
 
     elif isinstance(payload, list):
         raw = _flatten_features(payload)
@@ -735,7 +1057,7 @@ async def feature_schema() -> Dict[str, Any]:
         "schema_version": FEATURE_SCHEMA_VERSION,
         "expected_dim": FEATURE_DIM,
         "feature_names": FEATURE_NAMES,
-        "notes": "Send features as a fixed-order float array. Legacy dict payloads are supported but flattened by sorted keys and will include warnings.",
+        "notes": "Send features as a fixed-order float array. Legacy dict payloads are flattened by sorted numeric keys; rich Rust sidecar payloads are semantically projected into a 29-float vector.",
     }
 
 
