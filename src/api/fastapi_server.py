@@ -11,6 +11,7 @@ execution engines can subscribe to real-time model hints without polling.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -1388,7 +1389,25 @@ async def guidance_stream(websocket: WebSocket):
     try:
         await websocket.send_json({"type": "ready"})
         while True:
-            message = await queue.get()
+            send_task = asyncio.create_task(queue.get())
+            recv_task = asyncio.create_task(websocket.receive())
+            done, pending = await asyncio.wait(
+                {send_task, recv_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            for task in pending:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+            if recv_task in done:
+                incoming = recv_task.result()
+                if incoming.get("type") == "websocket.disconnect":
+                    break
+                continue
+
+            message = send_task.result()
             await websocket.send_json(message)
     except WebSocketDisconnect:
         return
