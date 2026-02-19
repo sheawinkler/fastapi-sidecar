@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SIDECAR_URL="${SIDECAR_URL:-http://*********:8288}"
+SIDECAR_URL="${SIDECAR_URL:-http://127.0.0.1:8288}"
 HEALTH_ENDPOINT="${SIDECAR_URL%/}/health"
 SCHEMA_ENDPOINT="${SIDECAR_URL%/}/schema/features"
 PREDICT_ENDPOINT="${SIDECAR_URL%/}/predict"
