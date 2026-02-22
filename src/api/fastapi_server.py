@@ -19,7 +19,7 @@ import math
 import os
 import time
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple, Union
@@ -62,6 +62,71 @@ def _data_dir() -> Path:
 
     root = os.getenv("SIDECAR_DATA_DIR", "data")
     return Path(root)
+
+
+def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(str(os.getenv(name, default)).strip())
+    except Exception:
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+_INFERENCE_CACHE_MAX = _env_int("SIDECAR_INFERENCE_CACHE_MAX", 20_000, 100, 500_000)
+_INFERENCE_CACHE_TTL_SECONDS = _env_int(
+    "SIDECAR_INFERENCE_CACHE_TTL_SECONDS",
+    60 * 60 * 24,
+    60,
+    60 * 60 * 24 * 14,
+)
+_inference_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+_inference_cache_lock = asyncio.Lock()
+
+
+def _prune_inference_cache_locked(now_ts: float) -> None:
+    expire_before = now_ts - float(_INFERENCE_CACHE_TTL_SECONDS)
+
+    while _inference_cache:
+        oldest_key, oldest = next(iter(_inference_cache.items()))
+        cached_at = float(oldest.get("_cached_at_unix", 0.0))
+        if cached_at >= expire_before:
+            break
+        _inference_cache.pop(oldest_key, None)
+
+    while len(_inference_cache) > _INFERENCE_CACHE_MAX:
+        _inference_cache.popitem(last=False)
+
+
+async def _cache_inference_record(record: Dict[str, Any]) -> None:
+    inference_id = str(record.get("inference_id", "")).strip()
+    if not inference_id:
+        return
+    now_ts = time.time()
+    entry = dict(record)
+    entry["_cached_at_unix"] = now_ts
+    async with _inference_cache_lock:
+        _prune_inference_cache_locked(now_ts)
+        _inference_cache[inference_id] = entry
+        _inference_cache.move_to_end(inference_id)
+        _prune_inference_cache_locked(now_ts)
+
+
+async def _get_cached_inference(inference_id: str) -> Optional[Dict[str, Any]]:
+    key = str(inference_id).strip()
+    if not key:
+        return None
+
+    now_ts = time.time()
+    async with _inference_cache_lock:
+        _prune_inference_cache_locked(now_ts)
+        entry = _inference_cache.get(key)
+        if entry is None:
+            return None
+        cached_at = float(entry.get("_cached_at_unix", 0.0))
+        if cached_at < now_ts - float(_INFERENCE_CACHE_TTL_SECONDS):
+            _inference_cache.pop(key, None)
+            return None
+        return dict(entry)
 
 
 def _append_jsonl(path: Path, record: Dict[str, Any]) -> None:
@@ -205,8 +270,8 @@ class FeedbackRequest(BaseModel):
     """Outcome feedback for lightweight calibration/training."""
 
     token: str
-    schema_version: str = Field(default=FEATURE_SCHEMA_VERSION)
-    features: List[float]
+    schema_version: Optional[str] = None
+    features: Optional[List[float]] = None
 
     # Optional linkage to a prior /predict response.
     inference_id: Optional[str] = None
@@ -1037,6 +1102,11 @@ async def health() -> Dict[str, Any]:
             "schema_version": getattr(_calibrator, "schema_version", None),
             "expected_dim": getattr(_calibrator, "expected_dim", None),
         },
+        "feedback": {
+            "inference_cache_entries": len(_inference_cache),
+            "inference_cache_max": _INFERENCE_CACHE_MAX,
+            "inference_cache_ttl_seconds": _INFERENCE_CACHE_TTL_SECONDS,
+        },
     }
 
     if mode == "stub":
@@ -1140,6 +1210,8 @@ async def predict(req: PredictRequest) -> PredictResponse:
     record_latency(latency_ms)
 
     metadata: Dict[str, Any] = dict(result)
+    if feature_vector is not None:
+        feature_vector_meta["vector"] = feature_vector
     metadata["inference_id"] = inference_id
     metadata["token"] = token
     metadata["feature_schema_version"] = schema_version
@@ -1308,6 +1380,23 @@ async def predict(req: PredictRequest) -> PredictResponse:
         model=str(result.get("model", model or "ensemble")),
         metadata=metadata,
     )
+    await _cache_inference_record(
+        {
+            "inference_id": inference_id,
+            "token": token,
+            "schema_version": schema_version,
+            "features": feature_vector,
+            "prediction_timestamp": datetime.utcnow().isoformat(),
+            "model_output": {
+                "prediction": prediction_value,
+                "class_prediction": class_prediction,
+                "score": score_value,
+                "confidence": confidence_value,
+                "expected_return": expected_return,
+                "model": str(result.get("model", model or "ensemble")),
+            },
+        }
+    )
     return payload
 
 
@@ -1318,20 +1407,6 @@ async def feedback(req: FeedbackRequest) -> FeedbackResponse:
     token = str(req.token).strip()
     if not token:
         raise HTTPException(status_code=400, detail="token must be non-empty")
-
-    if req.schema_version != FEATURE_SCHEMA_VERSION:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Unsupported schema_version '{req.schema_version}'. Expected '{FEATURE_SCHEMA_VERSION}'."
-            ),
-        )
-
-    if len(req.features) != FEATURE_DIM:
-        raise HTTPException(
-            status_code=400,
-            detail=f"features must be length {FEATURE_DIM} for schema {FEATURE_SCHEMA_VERSION}",
-        )
 
     if req.realized_return is None and req.realized_class is None:
         raise HTTPException(
@@ -1345,22 +1420,74 @@ async def feedback(req: FeedbackRequest) -> FeedbackResponse:
         if not math.isfinite(realized_return):
             raise HTTPException(status_code=400, detail="realized_return must be finite")
 
-    feature_hash = _hash_vector(req.features)
+    schema_version = str(req.schema_version or "").strip() or FEATURE_SCHEMA_VERSION
+    prediction_timestamp = req.prediction_timestamp
+    model_output = req.model_output
+
+    feature_vector: Optional[List[float]] = None
+    if req.features is not None:
+        try:
+            feature_vector = [float(v) for v in req.features]
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="features must be numeric") from exc
+    elif req.inference_id:
+        cached = await _get_cached_inference(req.inference_id)
+        if cached is not None:
+            cached_schema = str(cached.get("schema_version", "")).strip()
+            if not req.schema_version and cached_schema:
+                schema_version = cached_schema
+
+            cached_features = cached.get("features")
+            if isinstance(cached_features, list):
+                try:
+                    feature_vector = [float(v) for v in cached_features]
+                except (TypeError, ValueError):
+                    feature_vector = None
+
+            if prediction_timestamp is None:
+                prediction_timestamp = cached.get("prediction_timestamp")
+            if model_output is None and isinstance(cached.get("model_output"), dict):
+                model_output = cached.get("model_output")
+
+    if schema_version != FEATURE_SCHEMA_VERSION:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported schema_version '{schema_version}'. Expected '{FEATURE_SCHEMA_VERSION}'."
+            ),
+        )
+
+    if feature_vector is None:
+        if req.inference_id:
+            detail = "features missing and inference_id not found (or expired) in cache"
+        else:
+            detail = "Provide features or inference_id"
+        raise HTTPException(status_code=400, detail=detail)
+
+    if len(feature_vector) != FEATURE_DIM:
+        raise HTTPException(
+            status_code=400,
+            detail=f"features must be length {FEATURE_DIM} for schema {FEATURE_SCHEMA_VERSION}",
+        )
+    if not all(math.isfinite(v) for v in feature_vector):
+        raise HTTPException(status_code=400, detail="features must be finite")
+
+    feature_hash = _hash_vector(feature_vector)
     stored_at = datetime.utcnow().isoformat()
     day = stored_at.split("T", 1)[0]
 
     record: Dict[str, Any] = {
         "stored_at": stored_at,
         "token": token,
-        "schema_version": req.schema_version,
-        "features": req.features,
+        "schema_version": schema_version,
+        "features": feature_vector,
         "feature_hash": feature_hash,
         "inference_id": req.inference_id,
-        "prediction_timestamp": req.prediction_timestamp,
+        "prediction_timestamp": prediction_timestamp,
         "horizon_seconds": int(req.horizon_seconds),
         "realized_return": realized_return,
         "realized_class": req.realized_class,
-        "model_output": req.model_output,
+        "model_output": model_output,
         "metadata": req.metadata,
     }
 
