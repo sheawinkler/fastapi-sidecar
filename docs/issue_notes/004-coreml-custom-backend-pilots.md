@@ -5,7 +5,7 @@ Date: 2026-03-02
 ## Goal
 Build two exploratory backend pilots for sidecar inference:
 
-1. Core ML backend pilot (default requested runtime backend).
+1. Core ML backend pilot (optional acceleration backend).
 2. Custom JSON-export backend pilot with replay benchmark harness.
 
 ## What Changed
@@ -13,10 +13,10 @@ Build two exploratory backend pilots for sidecar inference:
 - Added backend runtime selector:
   - `src/api/inference_backends.py`
   - Backends: `torch`, `coreml`, `custom_export`, and `stub`.
-  - Default requested backend: `coreml`.
+  - Default requested backend: `custom_export`.
   - Fallback chain:
-    - `coreml` -> `custom_export` -> `torch`
     - `custom_export` -> `coreml` -> `torch`
+    - `coreml` -> `custom_export` -> `torch`
   - `/health` now includes `inference_backend` status/provenance.
 
 - Sidecar API integration:
@@ -25,7 +25,7 @@ Build two exploratory backend pilots for sidecar inference:
 
 - Sidecar launcher defaults:
   - `scripts/sidecar_run.sh` now defaults:
-    - `SIDECAR_INFERENCE_BACKEND=coreml`
+    - `SIDECAR_INFERENCE_BACKEND=custom_export`
     - `SIDECAR_COREML_MODEL_PATH=models/saved/coreml/ensemble_proxy.mlpackage`
     - `SIDECAR_CUSTOM_EXPORT_PATH=models/saved/custom_proxy/ensemble_proxy_v1.json`
 
@@ -77,7 +77,7 @@ python scripts/export_custom_proxy.py
 python scripts/replay_backend_benchmark.py --limit 300
 ```
 
-5. Start sidecar (default requests Core ML):
+5. Start sidecar (default requests custom export):
 
 ```bash
 scripts/sidecar_run.sh
@@ -85,6 +85,6 @@ scripts/sidecar_run.sh
 
 ## Notes
 
-- If Core ML artifact or dependency is missing, runtime falls back automatically.
+- If custom export or Core ML artifacts are missing, runtime falls back automatically.
 - Backend status and fallback reason are visible at `/health`.
 - This is an exploratory surrogate path; production routing should be validated with replay + shadow checks before hard dependency on any non-torch backend.

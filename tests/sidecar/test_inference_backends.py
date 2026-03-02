@@ -63,6 +63,25 @@ def test_coreml_requested_falls_back_to_torch_when_missing(tmp_path: Path, monke
     assert "coreml_unavailable" in (status.get("fallback_reason") or "")
 
 
+def test_default_requested_backend_is_custom_export(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    mod = _runtime_module()
+    missing_coreml = tmp_path / "no_model.mlpackage"
+    missing_custom = tmp_path / "no_custom.json"
+    monkeypatch.delenv("SIDECAR_INFERENCE_BACKEND", raising=False)
+    monkeypatch.setenv("SIDECAR_COREML_MODEL_PATH", str(missing_coreml))
+    monkeypatch.setenv("SIDECAR_CUSTOM_EXPORT_PATH", str(missing_custom))
+
+    runtime = mod.InferenceBackendRuntime(DummyEnsemble(), DummyStubEnsemble)
+    status = runtime.status_dict()
+
+    assert status["requested"] == "custom_export"
+    assert status["active"] == "torch"
+    fallback_reason = status.get("fallback_reason") or ""
+    assert "custom_export_unavailable" in fallback_reason
+    assert "coreml_unavailable" in fallback_reason
+    assert fallback_reason.index("custom_export_unavailable") < fallback_reason.index("coreml_unavailable")
+
+
 def test_custom_export_backend_predicts_from_json(tmp_path: Path):
     mod = _runtime_module()
     payload = {

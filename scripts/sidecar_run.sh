@@ -10,7 +10,7 @@ cd "$ROOT_DIR"
 : "${API_HOST:=*********}"
 : "${API_PORT:=8288}"
 : "${API_RELOAD:=false}"
-: "${SIDECAR_INFERENCE_BACKEND:=coreml}"
+: "${SIDECAR_INFERENCE_BACKEND:=custom_export}"
 : "${SIDECAR_COREML_MODEL_PATH:=models/saved/coreml/ensemble_proxy.mlpackage}"
 : "${SIDECAR_CUSTOM_EXPORT_PATH:=models/saved/custom_proxy/ensemble_proxy_v1.json}"
 
