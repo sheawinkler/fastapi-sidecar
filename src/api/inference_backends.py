@@ -6,7 +6,7 @@ This module provides a small runtime abstraction over three backend modes:
 - `coreml`: Core ML surrogate model path (macOS-only, optional dependency)
 - `custom_export`: custom JSON-exported surrogate runtime (NumPy)
 
-The default requested backend is `coreml`. Runtime falls back to supported
+The default requested backend is `custom_export`. Runtime falls back to supported
 alternatives when artifacts/dependencies are missing.
 """
 
@@ -154,12 +154,12 @@ class InferenceBackendRuntime:
         self._stub_cls = stub_cls
 
         self.requested_backend = (
-            str(requested_backend or os.getenv("SIDECAR_INFERENCE_BACKEND", "coreml"))
+            str(requested_backend or os.getenv("SIDECAR_INFERENCE_BACKEND", "custom_export"))
             .strip()
             .lower()
         )
         if not self.requested_backend:
-            self.requested_backend = "coreml"
+            self.requested_backend = "custom_export"
 
         self.coreml_model_path = Path(
             coreml_model_path
@@ -238,9 +238,9 @@ class InferenceBackendRuntime:
             "custom_export": ["custom_export", "coreml", "torch"],
             "custom": ["custom_export", "coreml", "torch"],
             "torch": ["torch"],
-            "auto": ["coreml", "custom_export", "torch"],
+            "auto": ["custom_export", "coreml", "torch"],
         }
-        return mapping.get(requested, ["coreml", "custom_export", "torch"])
+        return mapping.get(requested, ["custom_export", "coreml", "torch"])
 
     def _discover_available_backends(self) -> List[str]:
         available = ["torch"]
@@ -410,4 +410,3 @@ class InferenceBackendRuntime:
         if self.active_backend == "custom_export":
             return self._predict_custom_export(feature_vector)
         return self._predict_torch(feature_vector)
-
