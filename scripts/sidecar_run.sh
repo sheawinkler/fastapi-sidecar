@@ -10,6 +10,9 @@ cd "$ROOT_DIR"
 : "${API_HOST:=*********}"
 : "${API_PORT:=8288}"
 : "${API_RELOAD:=false}"
+: "${SIDECAR_INFERENCE_BACKEND:=coreml}"
+: "${SIDECAR_COREML_MODEL_PATH:=models/saved/coreml/ensemble_proxy.mlpackage}"
+: "${SIDECAR_CUSTOM_EXPORT_PATH:=models/saved/custom_proxy/ensemble_proxy_v1.json}"
 
 # Backward/typo-compatible alias: some shells export ENABLE_STUB instead of ENSEMBLE_STUB.
 # Only apply if ENSEMBLE_STUB is unset.
@@ -22,6 +25,7 @@ fi
 
 echo "[sidecar-run] root: $ROOT_DIR"
 echo "[sidecar-run] API_HOST=$API_HOST API_PORT=$API_PORT API_RELOAD=$API_RELOAD ENSEMBLE_STUB=$ENSEMBLE_STUB"
+echo "[sidecar-run] SIDECAR_INFERENCE_BACKEND=$SIDECAR_INFERENCE_BACKEND SIDECAR_COREML_MODEL_PATH=$SIDECAR_COREML_MODEL_PATH SIDECAR_CUSTOM_EXPORT_PATH=$SIDECAR_CUSTOM_EXPORT_PATH"
 
 echo "[sidecar-run] Ensuring virtualenv + deps"
 if command -v uv >/dev/null 2>&1; then

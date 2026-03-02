@@ -29,6 +29,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.cors import CORSMiddleware
 
+from .inference_backends import InferenceBackendRuntime
 from ..training.calibrator import CalibratorBundle, load_latest_calibrator
 
 torch = None  # type: ignore[assignment]
@@ -358,6 +359,7 @@ logger = logging.getLogger("ensemble.api")
 logger.setLevel(logging.INFO)
 
 _ensemble = load_ensemble()
+_inference_backend = InferenceBackendRuntime(_ensemble, StubEnsemble)
 _telemetry = TelemetryState()
 
 # Optional lightweight calibrator trained from /feedback logs.
@@ -1112,6 +1114,7 @@ async def health() -> Dict[str, Any]:
             "inference_cache_max": _INFERENCE_CACHE_MAX,
             "inference_cache_ttl_seconds": _INFERENCE_CACHE_TTL_SECONDS,
         },
+        "inference_backend": _inference_backend.status_dict(),
     }
 
     if mode == "stub":
@@ -1195,15 +1198,11 @@ async def predict(req: PredictRequest) -> PredictResponse:
 
     # Run inference.
     try:
-        if isinstance(_ensemble, StubEnsemble):
-            features_payload = _mapping_for_stub(features)
-            result = _ensemble.predict_ensemble(features_payload, model=model)
-        else:
-            if feature_vector is None:
-                raise ValueError("Feature vector is empty")
-            torch_mod = _require_torch()
-            tensor_input = torch_mod.tensor(feature_vector, dtype=torch_mod.float32).unsqueeze(0)
-            result = _ensemble.predict_ensemble(tensor_input)
+        result = _inference_backend.predict(
+            feature_vector=feature_vector,
+            raw_features=features,
+            model=model,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:  # pragma: no cover - torch unavailable
@@ -1221,6 +1220,7 @@ async def predict(req: PredictRequest) -> PredictResponse:
     metadata["inference_id"] = inference_id
     metadata["token"] = token
     metadata["feature_schema_version"] = schema_version
+    metadata["inference_backend"] = _inference_backend.status_dict()
     metadata["feature"] = feature_vector_meta
 
     class_prediction: Optional[int] = None

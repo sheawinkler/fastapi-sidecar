@@ -44,6 +44,8 @@ def test_health_includes_schema_and_calibrator_status(sidecar_server_module):
 
     assert "calibrator" in body
     assert body["calibrator"]["active"] is False
+    assert "inference_backend" in body
+    assert body["inference_backend"]["active"] == "stub"
 
 
 def test_schema_features_v1(sidecar_server_module):
