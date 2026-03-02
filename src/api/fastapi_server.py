@@ -368,6 +368,8 @@ _calibrator, _calibrator_reason = load_latest_calibrator(_CALIBRATOR_ROOT)
 SIGNAL_FEED_URL = os.getenv(
     "SIGNAL_FEED_URL", "http://127.0.0.1:8075/signals/latest?limit=200"
 )
+SIGNAL_FEED_API_KEY = str(os.getenv("SIGNAL_FEED_API_KEY", "")).strip()
+SIGNAL_FEED_API_HEADER = str(os.getenv("SIGNAL_FEED_API_HEADER", "x-api-key")).strip()
 SIGNAL_REFRESH_SECONDS = int(os.getenv("SIGNAL_REFRESH_SECONDS", "20"))
 SIGNAL_HISTORY_LIMIT = int(os.getenv("SIGNAL_HISTORY_LIMIT", "200"))
 SIGNAL_MOMENTUM_FLOOR = float(os.getenv("SIGNAL_MOMENTUM_FLOOR", "1.0"))
@@ -433,8 +435,11 @@ class SignalCache:
                 self._known_files.discard(key)
 
     async def _fetch_feed(self) -> List[OverrideEntry]:
+        headers: Optional[Dict[str, str]] = None
+        if SIGNAL_FEED_API_KEY and SIGNAL_FEED_API_HEADER:
+            headers = {SIGNAL_FEED_API_HEADER: SIGNAL_FEED_API_KEY}
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(SIGNAL_FEED_URL)
+            resp = await client.get(SIGNAL_FEED_URL, headers=headers)
         resp.raise_for_status()
         body = resp.json()
         rows = body.get("signals", []) if isinstance(body, dict) else []
@@ -1145,6 +1150,7 @@ async def strategy_overrides(limit: int = 15) -> Dict[str, Any]:
     return {
         "overrides": [entry.model_dump() for entry in overrides],
         "source": SIGNAL_FEED_URL,
+        "auth_header_configured": bool(SIGNAL_FEED_API_KEY and SIGNAL_FEED_API_HEADER),
     }
 
 

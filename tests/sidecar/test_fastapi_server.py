@@ -1,4 +1,5 @@
 import importlib
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -56,6 +57,62 @@ def test_schema_features_v1(sidecar_server_module):
     assert body["feature_names"][0] == "x0"
     assert body["feature_names"][-1] == "x28"
     assert len(body["feature_names"]) == 29
+
+
+def test_signal_feed_uses_api_key_header(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ENSEMBLE_STUB", "true")
+    monkeypatch.setenv("SIGNAL_CACHE_ENABLED", "false")
+    monkeypatch.setenv("CALIBRATOR_ROOT", str(tmp_path / "calibrator"))
+    monkeypatch.setenv("SIGNAL_FEED_URL", "http://127.0.0.1:8075/signals/latest?limit=2")
+    monkeypatch.setenv("SIGNAL_FEED_API_KEY", "test-key-123")
+    monkeypatch.setenv("SIGNAL_FEED_API_HEADER", "x-api-key")
+
+    module = _fresh_import_fastapi_server(monkeypatch)
+    observed = {}
+
+    class _DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "signals": [
+                    {
+                        "symbol": "SOL",
+                        "address": "So11111111111111111111111111111111111111112",
+                        "price_usd": 100.0,
+                        "volume_24h_usd": 500000.0,
+                        "liquidity_usd": 350000.0,
+                        "momentum_score": 1.5,
+                        "risk_score": 0.2,
+                        "verified": True,
+                        "created_at": "2026-03-02T00:00:00Z",
+                    }
+                ]
+            }
+
+    class _DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None):
+            observed["url"] = url
+            observed["headers"] = headers or {}
+            return _DummyResponse()
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", _DummyAsyncClient)
+    entries = asyncio.run(module.signal_cache._fetch_feed())
+
+    assert observed["url"].startswith("http://127.0.0.1:8075/signals/latest")
+    assert observed["headers"].get("x-api-key") == "test-key-123"
+    assert len(entries) == 1
+    assert entries[0].symbol == "SOL"
 
 
 def test_predict_vector_features_returns_score_and_schema(sidecar_server_module):
