@@ -4,7 +4,7 @@
 
 Can be used as a sidecar for other applications to create distinct application surfaces for model running, or can be built out into a fully integrated product.
 Supports: 
-- Apple Neural Engine Private API ((ANE repo)[https://github.com/mhttps://github.com/maderix/ANE.git]) (Apple M-Series)
+- Apple Neural Engine Private API ([ANE repo](https://github.com/mhttps://github.com/maderix/ANE.git)) (Apple M-Series)
   - Unreal matrix solving
   - 3800x faster than base runtime (pytorch/tensorflow) in small test
 - CoreML fallback (Apple M-Series)
