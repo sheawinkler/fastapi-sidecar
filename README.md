@@ -2,6 +2,15 @@
 
 ## 🚀 Overview
 
+Can be used as a sidecar for other applications to create distinct application surfaces for model running, or can be built out into a fully integrated product.
+Supports: 
+- Apple Neural Engine Private API ([ANE repo]([https://github.com/m](https://github.com/maderix/ANE.git))) (Apple M-Series)
+  - Unreal matrix solving
+  - 3800x faster than base runtime (pytorch/tensorflow) in small test
+- CoreML fallback (Apple M-Series)
+  - 39x faster than base runtime in small test
+- regular runtime for final fallback / default for non-MacOS
+
 A sophisticated cryptocurrency automated trading application powered by ensemble AI analysis, implementing 10 cutting-edge machine learning models for superior trading performance. This system is designed for real-money trading with enterprise-grade security, comprehensive risk management, and advanced AI ensemble techniques.
 
 ## 🏗️ Architecture
@@ -281,7 +290,7 @@ This software is designed for sophisticated users who understand the risks of al
 ## 📞 Support
 
 For technical support and questions:
-- Email: support@crypto-ai-trading.com
+- Email: sheawinkler@gmail.com
 - Documentation: [Technical Docs](docs/)
 - Issue Tracker: GitHub Issues
 
