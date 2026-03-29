@@ -190,16 +190,14 @@ class InferenceBackendRuntime:
         self._initialize()
 
     def _initialize(self) -> None:
-        if isinstance(self._ensemble, self._stub_cls):
-            self.active_backend = "stub"
-            self.available_backends = ["stub"]
-            self.fallback_reason = "stub ensemble is active"
-            return
-
         chain = self._resolve_chain(self.requested_backend)
         reasons: List[str] = []
+        stub_ensemble = isinstance(self._ensemble, self._stub_cls)
         for candidate in chain:
             if candidate == "torch":
+                if stub_ensemble:
+                    reasons.append("torch_unavailable:ensemble_not_loaded")
+                    continue
                 self.active_backend = "torch"
                 self.available_backends = self._discover_available_backends()
                 if reasons:
@@ -227,6 +225,16 @@ class InferenceBackendRuntime:
                 if reason:
                     reasons.append(f"custom_export_unavailable:{reason}")
 
+        if stub_ensemble:
+            self.active_backend = "stub"
+            self.available_backends = ["stub"]
+            stub_reason = str(getattr(self._ensemble, "reason", "")).strip()
+            reason_parts = [part for part in reasons if part]
+            if stub_reason:
+                reason_parts.insert(0, f"stub_ensemble:{stub_reason}")
+            self.fallback_reason = "; ".join(reason_parts) if reason_parts else "stub ensemble is active"
+            return
+
         self.active_backend = "torch"
         self.available_backends = self._discover_available_backends()
         if reasons:
@@ -243,12 +251,22 @@ class InferenceBackendRuntime:
         return mapping.get(requested, ["custom_export", "coreml", "torch"])
 
     def _discover_available_backends(self) -> List[str]:
-        available = ["torch"]
+        available: List[str] = []
+        if not isinstance(self._ensemble, self._stub_cls):
+            available.append("torch")
         if self._coreml_model is not None:
             available.append("coreml")
         if self._custom_model is not None:
             available.append("custom_export")
         return available
+
+    def is_stub_backend(self) -> bool:
+        return self.active_backend == "stub"
+
+    def expected_input_dim(self, default_dim: int) -> int:
+        if self.active_backend == "custom_export" and self._custom_model is not None:
+            return int(self._custom_model.input_dim)
+        return int(default_dim)
 
     def _try_activate_coreml(self) -> Tuple[bool, Optional[str]]:
         if not self.coreml_model_path.exists():
