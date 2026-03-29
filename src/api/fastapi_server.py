@@ -358,8 +358,38 @@ app.add_middleware(
 logger = logging.getLogger("ensemble.api")
 logger.setLevel(logging.INFO)
 
-_ensemble = load_ensemble()
-_inference_backend = InferenceBackendRuntime(_ensemble, StubEnsemble)
+def _initialize_runtime() -> tuple[Any, InferenceBackendRuntime]:
+    stub_requested = os.getenv("ENSEMBLE_STUB", "false").lower() == "true"
+    requested_backend = str(
+        os.getenv("SIDECAR_INFERENCE_BACKEND", "custom_export")
+    ).strip().lower() or "custom_export"
+    non_torch_requested = requested_backend in {"auto", "custom", "custom_export", "coreml"}
+
+    if stub_requested:
+        ensemble: Any = load_ensemble()
+        backend = InferenceBackendRuntime(ensemble, StubEnsemble)
+        return ensemble, backend
+
+    if non_torch_requested:
+        ensemble = StubEnsemble(reason="torch ensemble deferred")
+        backend = InferenceBackendRuntime(ensemble, StubEnsemble)
+        if not backend.is_stub_backend():
+            return ensemble, backend
+
+    ensemble = load_ensemble()
+    backend = InferenceBackendRuntime(ensemble, StubEnsemble)
+    return ensemble, backend
+
+
+def _sidecar_mode() -> str:
+    return "stub" if _inference_backend.is_stub_backend() else "full"
+
+
+def _backend_is_full() -> bool:
+    return not _inference_backend.is_stub_backend()
+
+
+_ensemble, _inference_backend = _initialize_runtime()
 _telemetry = TelemetryState()
 
 # Optional lightweight calibrator trained from /feedback logs.
@@ -1048,6 +1078,8 @@ def _mapping_for_stub(payload: FeaturePayload) -> Dict[str, Any]:
 
 
 def _model_inventory_size() -> int:
+    if _inference_backend.active_backend in {"custom_export", "coreml"}:
+        return 1
     models = getattr(_ensemble, "models", None)
     if isinstance(models, dict):
         return len(models)
@@ -1058,6 +1090,11 @@ def _model_inventory_size() -> int:
 
 
 def _model_status() -> List[Dict[str, Any]]:
+    if _inference_backend.active_backend == "custom_export":
+        return [{"name": "custom_export", "class": "CustomProxyModel", "fallback": False}]
+    if _inference_backend.active_backend == "coreml":
+        return [{"name": "coreml", "class": "CoreMLProxyModel", "fallback": False}]
+
     models = getattr(_ensemble, "models", None)
     if not isinstance(models, dict):
         return []
@@ -1091,7 +1128,7 @@ def record_latency(latency_ms: float) -> None:
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
-    mode = "stub" if isinstance(_ensemble, StubEnsemble) else "full"
+    mode = _sidecar_mode()
     payload: Dict[str, Any] = {
         "status": "ok",
         "mode": mode,
@@ -1166,8 +1203,10 @@ async def predict(req: PredictRequest) -> PredictResponse:
 
     # Determine expected feature dimension.
     expected_dim = FEATURE_DIM
-    if not isinstance(_ensemble, StubEnsemble):
+    if _backend_is_full():
         expected_dim = int(getattr(_ensemble, "input_dim", FEATURE_DIM) or FEATURE_DIM)
+        if expected_dim == FEATURE_DIM:
+            expected_dim = _inference_backend.expected_input_dim(FEATURE_DIM)
 
     # Normalize features and collect warnings/trace metadata.
     feature_vector_meta: Dict[str, Any] = {}
@@ -1175,7 +1214,7 @@ async def predict(req: PredictRequest) -> PredictResponse:
     try:
         feature_vector, feature_vector_meta = _prepare_feature_vector(features, expected_dim)
     except ValueError as exc:
-        if isinstance(_ensemble, StubEnsemble):
+        if _inference_backend.is_stub_backend():
             # Stub mode can still run with non-numeric keys, but warn operators.
             feature_vector_meta = {
                 "input_type": "unknown",
@@ -1226,7 +1265,7 @@ async def predict(req: PredictRequest) -> PredictResponse:
     class_prediction: Optional[int] = None
     probabilities: Optional[List[float]] = None
 
-    if not isinstance(_ensemble, StubEnsemble):
+    if _backend_is_full():
         try:
             class_prediction = int(result.get("prediction", 2))
         except (TypeError, ValueError):
