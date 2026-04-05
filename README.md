@@ -198,6 +198,42 @@ SIDECAR_URL=http://localhost:8288 scripts/sidecar_smoke.sh
 The script pings `/health`, prints the current mode (`stub` vs `full`), and sends
 a sample `/predict` payload so you can catch regressions quickly.
 
+### Predictive Trainer Sidecar
+
+The sidecar can now orchestrate predictive-model refreshes for
+`/Users/sheawinkler/Documents/Projects/algotraderv2_rust` without reimplementing
+the Rust repo's trainer logic.
+
+Endpoints:
+
+- `GET /trainer/health`
+- `GET /trainer/status`
+- `GET /trainer/history`
+- `POST /trainer/run`
+- `POST /trainer/promote/{run_id}`
+- `GET /trainer/active-model`
+- `GET /trainer/candidate-model/{run_id}`
+
+Default behavior:
+
+- scheduler disabled unless `SIDECAR_PREDICTIVE_TRAINER_ENABLED=true`
+- cadence defaults to `600` seconds when enabled
+- training uses the Rust repo's shadow firehose corpus as the primary dataset
+- candidate models promote only when they improve row counts without materially
+  degrading positive share or calibration
+- relaunches happen only when `algotraderv2_rust` is on clean synced `main`
+  and there are `0` open positions
+
+Key env vars:
+
+- `SIDECAR_PREDICTIVE_TRAINER_ALGO_REPO_DIR`
+- `SIDECAR_PREDICTIVE_TRAINER_DATA_DIR`
+- `SIDECAR_PREDICTIVE_TRAINER_ENABLED`
+- `SIDECAR_PREDICTIVE_TRAINER_INTERVAL_SECS`
+- `SIDECAR_PREDICTIVE_TRAINER_AUTO_PROMOTE`
+- `SIDECAR_PREDICTIVE_TRAINER_RELAUNCH_ENABLED`
+- `SIDECAR_PREDICTIVE_TRAINER_TIMEOUT_SECS`
+
 ## 🧪 Testing
 
 ### Backtesting

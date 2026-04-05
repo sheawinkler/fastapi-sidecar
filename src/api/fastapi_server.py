@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.cors import CORSMiddleware
 
 from .inference_backends import InferenceBackendRuntime
+from .predictive_trainer import PredictiveTrainerConfig, PredictiveTrainerManager
 from ..training.calibrator import CalibratorBundle, load_latest_calibrator
 
 torch = None  # type: ignore[assignment]
@@ -396,6 +397,7 @@ _telemetry = TelemetryState()
 _CALIBRATOR_ROOT = Path(os.getenv("CALIBRATOR_ROOT", "models/saved/calibrator"))
 _calibrator: Optional[CalibratorBundle]
 _calibrator, _calibrator_reason = load_latest_calibrator(_CALIBRATOR_ROOT)
+_trainer_manager = PredictiveTrainerManager(PredictiveTrainerConfig.from_env(_data_dir()))
 
 SIGNAL_FEED_URL = os.getenv(
     "SIGNAL_FEED_URL", "http://127.0.0.1:8075/signals/latest?limit=200"
@@ -1152,6 +1154,7 @@ async def health() -> Dict[str, Any]:
             "inference_cache_ttl_seconds": _INFERENCE_CACHE_TTL_SECONDS,
         },
         "inference_backend": _inference_backend.status_dict(),
+        "trainer": _trainer_manager.health_payload(),
     }
 
     if mode == "stub":
@@ -1600,12 +1603,59 @@ async def telemetry() -> TelemetryState:
     return _telemetry
 
 
+@app.get("/trainer/health")
+async def trainer_health() -> Dict[str, Any]:
+    return _trainer_manager.health_payload()
+
+
+@app.get("/trainer/status")
+async def trainer_status() -> Dict[str, Any]:
+    return _trainer_manager.status_payload()
+
+
+@app.get("/trainer/history")
+async def trainer_history(limit: int = 25) -> Dict[str, Any]:
+    return _trainer_manager.history_payload(limit=max(1, min(limit, 200)))
+
+
+@app.post("/trainer/run")
+async def trainer_run() -> Dict[str, Any]:
+    return await _trainer_manager.start_run(requested_by="manual", auto_promote=None)
+
+
+@app.post("/trainer/promote/{run_id}")
+async def trainer_promote(run_id: str) -> Dict[str, Any]:
+    try:
+        return await _trainer_manager.promote_run(run_id, forced=True)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/trainer/active-model")
+async def trainer_active_model() -> Dict[str, Any]:
+    return _trainer_manager.active_model_payload()
+
+
+@app.get("/trainer/candidate-model/{run_id}")
+async def trainer_candidate_model(run_id: str) -> Dict[str, Any]:
+    try:
+        return _trainer_manager.candidate_model_payload(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.on_event("startup")
 async def bootstrap_signal_cache() -> None:
     if os.getenv("SIGNAL_CACHE_ENABLED", "true").lower() != "true":
         logger.info("Signal cache disabled")
-        return
-    asyncio.create_task(signal_cache.run())
+    else:
+        asyncio.create_task(signal_cache.run())
+    await _trainer_manager.start()
+
+
+@app.on_event("shutdown")
+async def shutdown_trainer_manager() -> None:
+    await _trainer_manager.shutdown()
 
 
 if __name__ == "__main__":  # pragma: no cover
