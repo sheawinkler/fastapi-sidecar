@@ -145,6 +145,44 @@ async def test_promote_run_updates_manifest(tmp_path: Path, monkeypatch: pytest.
     assert updated["promotion"]["state"] == "promoted_pending_restart"
 
 
+def test_promote_candidate_copies_next_state_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    run_id = "run-ledger"
+    run_dir = manager._run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    model_path = run_dir / "model_candidate.json"
+    training_path = run_dir / "prelaunch_training_candidate.json"
+    calibration_path = run_dir / "calibration_candidate.json"
+    ledger_path = run_dir / "next_state_ledger_candidate.jsonl"
+    model_path.write_text("{}", encoding="utf-8")
+    training_path.write_text("{}", encoding="utf-8")
+    calibration_path.write_text("{}", encoding="utf-8")
+    ledger_path.write_text('{"row":1}\n', encoding="utf-8")
+
+    monkeypatch.setattr(
+        manager,
+        "_current_open_positions",
+        lambda work_dir: {"ok": True, "open_positions_remaining": 1},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_repo_launch_ready",
+        lambda: {"status_clean": True, "branch": "main", "head_matches_origin_main": True},
+    )
+
+    result = manager._promote_candidate(
+        run_id=run_id,
+        model_candidate=model_path,
+        training_candidate=training_path,
+        calibration_candidate=calibration_path,
+        ledger_candidate=ledger_path,
+        forced=False,
+    )
+
+    assert result["state"] == "promoted_pending_restart"
+    assert manager.config.next_state_ledger_path.read_text(encoding="utf-8") == '{"row":1}\n'
+
+
 def test_history_payload_reads_jsonl(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     manager._append_history({"timestamp": "2026-04-05T00:00:00Z", "event": "trainer_run_completed"})

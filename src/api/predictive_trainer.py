@@ -132,6 +132,10 @@ class PredictiveTrainerConfig:
         return self.algo_repo_dir / "logs/analysis/predictive_entry/calibration_latest.json"
 
     @property
+    def next_state_ledger_path(self) -> Path:
+        return self.algo_repo_dir / "logs/analysis/predictive_entry/next_state_ledger.jsonl"
+
+    @property
     def dataset_path(self) -> Path:
         return self.algo_repo_dir / "logs/analysis/monte_carlo/dataset_latest.jsonl"
 
@@ -264,6 +268,7 @@ class PredictiveTrainerManager:
             self._scheduler_task = None
 
     async def _scheduler_loop(self) -> None:
+        await asyncio.sleep(self.config.train_interval_secs)
         while True:
             try:
                 if not self.is_running():
@@ -411,6 +416,7 @@ class PredictiveTrainerManager:
             "model_path": str(self.config.model_path),
             "training_path": str(self.config.training_path),
             "calibration_path": str(self.config.calibration_path),
+            "next_state_ledger_path": str(self.config.next_state_ledger_path),
             "training_rows": _safe_int(
                 training_section.get("rows"), _safe_int(data_quality.get("row_count"), 0)
             ),
@@ -787,6 +793,7 @@ class PredictiveTrainerManager:
                     model_candidate=model_candidate,
                     training_candidate=training_candidate,
                     calibration_candidate=calibration_candidate,
+                    ledger_candidate=ledger_candidate,
                     forced=False,
                 )
                 manifest["promotion"] = {
@@ -838,11 +845,14 @@ class PredictiveTrainerManager:
         model_candidate: Path,
         training_candidate: Path,
         calibration_candidate: Path,
+        ledger_candidate: Path,
         forced: bool,
     ) -> dict[str, Any]:
         _atomic_copy(model_candidate, self.config.model_path)
         _atomic_copy(training_candidate, self.config.training_path)
         _atomic_copy(calibration_candidate, self.config.calibration_path)
+        if ledger_candidate.exists():
+            _atomic_copy(ledger_candidate, self.config.next_state_ledger_path)
 
         live_state = self._current_open_positions(self._run_dir(run_id))
         repo_state = self._repo_launch_ready()
@@ -913,7 +923,13 @@ class PredictiveTrainerManager:
         model_candidate = Path(str(artifacts.get("candidate_model") or ""))
         training_candidate = Path(str(artifacts.get("candidate_training") or ""))
         calibration_candidate = Path(str(artifacts.get("candidate_calibration") or ""))
-        if not model_candidate.exists() or not training_candidate.exists() or not calibration_candidate.exists():
+        ledger_candidate = Path(str(artifacts.get("candidate_ledger") or ""))
+        if (
+            not model_candidate.exists()
+            or not training_candidate.exists()
+            or not calibration_candidate.exists()
+            or not ledger_candidate.exists()
+        ):
             raise FileNotFoundError(f"run {run_id} is missing candidate artifacts")
         promotion = await asyncio.to_thread(
             self._promote_candidate,
@@ -921,6 +937,7 @@ class PredictiveTrainerManager:
             model_candidate=model_candidate,
             training_candidate=training_candidate,
             calibration_candidate=calibration_candidate,
+            ledger_candidate=ledger_candidate,
             forced=forced,
         )
         manifest["promotion"] = {
@@ -951,6 +968,7 @@ class PredictiveTrainerManager:
             "active_model_path": str(self.config.model_path),
             "active_training_path": str(self.config.training_path),
             "active_calibration_path": str(self.config.calibration_path),
+            "active_next_state_ledger_path": str(self.config.next_state_ledger_path),
             "shadow_index_path": str(self.config.shadow_index_path),
             "train_interval_secs": self.config.train_interval_secs,
             "train_timeout_secs": self.config.train_timeout_secs,
