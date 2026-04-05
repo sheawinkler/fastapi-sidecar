@@ -6,6 +6,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.venv*/
 
 # Build artifacts
 *.log

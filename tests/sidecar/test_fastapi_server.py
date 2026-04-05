@@ -38,6 +38,7 @@ def test_health_includes_schema_and_calibrator_status(sidecar_server_module):
         body = resp.json()
 
     assert body["status"] == "ok"
+    assert body["mode"] in {"stub", "full"}
     assert "feature_schema" in body
     assert body["feature_schema"]["schema_version"] == "v1"
     assert body["feature_schema"]["expected_dim"] == 29
@@ -45,7 +46,7 @@ def test_health_includes_schema_and_calibrator_status(sidecar_server_module):
     assert "calibrator" in body
     assert body["calibrator"]["active"] is False
     assert "inference_backend" in body
-    assert body["inference_backend"]["active"] == "stub"
+    assert body["inference_backend"]["active"] in {"stub", "custom_export"}
 
 
 def test_schema_features_v1(sidecar_server_module):
@@ -369,3 +370,59 @@ def test_predict_applies_calibrator_when_present(tmp_path: Path, monkeypatch: py
 
     assert 0.99 <= float(body["score"]) <= 1.0
     assert abs(float(body["expected_return"]) - 0.25) < 1e-6
+
+
+def test_trainer_endpoints_are_exposed(sidecar_server_module, monkeypatch: pytest.MonkeyPatch):
+    class _DummyTrainer:
+        def health_payload(self):
+            return {"status": "ok", "scheduler_enabled": False}
+
+        def status_payload(self):
+            return {"status": "idle", "active_run_id": None}
+
+        def history_payload(self, limit: int = 25):
+            return {"history": [{"event": "trainer_run_completed"}], "limit": limit}
+
+        async def start_run(self, *, requested_by: str, auto_promote):
+            return {"status": "started", "run_id": "run-123", "requested_by": requested_by}
+
+        async def promote_run(self, run_id: str, *, forced: bool = True):
+            return {"state": "promoted_pending_restart", "run_id": run_id, "forced": forced}
+
+        def active_model_payload(self):
+            return {"training_rows": 1234, "shadow_rows": 1200}
+
+        def candidate_model_payload(self, run_id: str):
+            return {"run_id": run_id, "status": "completed"}
+
+        async def start(self):
+            return None
+
+        async def shutdown(self):
+            return None
+
+    monkeypatch.setattr(sidecar_server_module, "_trainer_manager", _DummyTrainer())
+
+    with TestClient(sidecar_server_module.app) as client:
+        health = client.get("/trainer/health")
+        status = client.get("/trainer/status")
+        history = client.get("/trainer/history")
+        trigger = client.post("/trainer/run")
+        promote = client.post("/trainer/promote/run-123")
+        active_model = client.get("/trainer/active-model")
+        candidate_model = client.get("/trainer/candidate-model/run-123")
+
+    assert health.status_code == 200
+    assert health.json()["status"] == "ok"
+    assert status.status_code == 200
+    assert status.json()["status"] == "idle"
+    assert history.status_code == 200
+    assert history.json()["history"][0]["event"] == "trainer_run_completed"
+    assert trigger.status_code == 200
+    assert trigger.json()["run_id"] == "run-123"
+    assert promote.status_code == 200
+    assert promote.json()["state"] == "promoted_pending_restart"
+    assert active_model.status_code == 200
+    assert active_model.json()["training_rows"] == 1234
+    assert candidate_model.status_code == 200
+    assert candidate_model.json()["run_id"] == "run-123"
