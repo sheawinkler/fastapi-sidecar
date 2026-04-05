@@ -36,6 +36,13 @@ def _safe_float(value: Any, default: float | None = None) -> float | None:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -209,18 +216,9 @@ class PredictiveTrainerConfig:
             train_interval_secs=max(
                 60, _safe_int(os.getenv("SIDECAR_PREDICTIVE_TRAINER_INTERVAL_SECS"), 600)
             ),
-            scheduler_enabled=os.getenv(
-                "SIDECAR_PREDICTIVE_TRAINER_ENABLED", "false"
-            ).strip().lower()
-            == "true",
-            auto_promote=os.getenv(
-                "SIDECAR_PREDICTIVE_TRAINER_AUTO_PROMOTE", "true"
-            ).strip().lower()
-            == "true",
-            relaunch_enabled=os.getenv(
-                "SIDECAR_PREDICTIVE_TRAINER_RELAUNCH_ENABLED", "true"
-            ).strip().lower()
-            == "true",
+            scheduler_enabled=_env_bool("SIDECAR_PREDICTIVE_TRAINER_ENABLED", False),
+            auto_promote=_env_bool("SIDECAR_PREDICTIVE_TRAINER_AUTO_PROMOTE", True),
+            relaunch_enabled=_env_bool("SIDECAR_PREDICTIVE_TRAINER_RELAUNCH_ENABLED", True),
             python_bin=str(
                 os.getenv("SIDECAR_PREDICTIVE_TRAINER_PYTHON", sys.executable)
             ).strip()
