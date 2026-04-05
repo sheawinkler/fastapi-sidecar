@@ -28,6 +28,21 @@ def _make_config(tmp_path: Path) -> PredictiveTrainerConfig:
     )
 
 
+def test_from_env_accepts_numeric_truthy_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    algo_repo = tmp_path / "algo"
+    algo_repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_ALGO_REPO_DIR", str(algo_repo))
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_ENABLED", "1")
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_AUTO_PROMOTE", "yes")
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_RELAUNCH_ENABLED", "on")
+
+    config = PredictiveTrainerConfig.from_env(tmp_path / "data")
+
+    assert config.scheduler_enabled is True
+    assert config.auto_promote is True
+    assert config.relaunch_enabled is True
+
+
 def test_evaluate_candidate_accepts_improvement(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     active = {
