@@ -76,6 +76,15 @@ def _count_json_array_entries(path: Path) -> int:
     return 0
 
 
+def _path_text(path: Path, relative_to: Path | None = None) -> str:
+    if relative_to is not None:
+        try:
+            return str(path.relative_to(relative_to))
+        except Exception:
+            pass
+    return str(path)
+
+
 def _load_history(path: Path, limit: int = 25) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -160,6 +169,10 @@ class PredictiveTrainerConfig:
         return self.algo_repo_dir / "scripts/deploy_live.sh"
 
     @property
+    def build_dataset_script_path(self) -> Path:
+        return self.algo_repo_dir / "scripts/build_mc_dataset.py"
+
+    @property
     def train_script_path(self) -> Path:
         return self.algo_repo_dir / "scripts/train_predictive_entry_model.py"
 
@@ -182,10 +195,14 @@ class PredictiveTrainerConfig:
                 "SIDECAR_PREDICTIVE_TRAINER_ALGO_REPO_DIR",
                 "/Users/sheawinkler/Documents/Projects/algotraderv2_rust",
             )
-        ).expanduser()
+        ).expanduser().resolve()
         data_dir = Path(
             os.getenv("SIDECAR_PREDICTIVE_TRAINER_DATA_DIR", str(base_data_dir))
         ).expanduser()
+        if not data_dir.is_absolute():
+            data_dir = (Path.cwd() / data_dir).resolve()
+        else:
+            data_dir = data_dir.resolve()
         return cls(
             algo_repo_dir=algo_repo_dir,
             data_dir=data_dir,
@@ -464,7 +481,9 @@ class PredictiveTrainerManager:
     def _build_attestation(
         self,
         candidate_model_path: Path,
+        dataset_path: Path,
         dataset_summary: dict[str, Any],
+        dataset_summary_path: Path,
         candidate_output_hint: Path,
     ) -> dict[str, Any]:
         model = _read_json(candidate_model_path)
@@ -475,18 +494,16 @@ class PredictiveTrainerManager:
         version = model.get("version")
         return {
             "artifacts": {
-                "dataset_path": str(self.config.dataset_path.relative_to(self.config.algo_repo_dir)),
-                "dataset_summary_path": str(
-                    self.config.dataset_summary_path.relative_to(self.config.algo_repo_dir)
-                ),
-                "model_path": str(self.config.model_path.relative_to(self.config.algo_repo_dir)),
+                "dataset_path": _path_text(dataset_path, self.config.algo_repo_dir),
+                "dataset_summary_path": _path_text(dataset_summary_path, self.config.algo_repo_dir),
+                "model_path": _path_text(self.config.model_path, self.config.algo_repo_dir),
             },
             "dataset": {
                 "ok": bool(dataset_summary.get("ok", False)),
                 "quality_gates": dict(dataset_summary.get("quality_gates") or {}),
                 "reason": dataset_summary.get("reason"),
                 "rows": _safe_int(dataset_summary.get("rows"), 0),
-                "summary": str(dataset_summary.get("summary") or self.config.dataset_summary_path),
+                "summary": str(dataset_summary.get("summary") or dataset_summary_path),
                 "unknown_sleeve_ratio": dataset_summary.get("unknown_sleeve_ratio"),
             },
             "generated_at": _utc_iso(),
@@ -658,12 +675,74 @@ class PredictiveTrainerManager:
             ledger_candidate = run_dir / "next_state_ledger_candidate.jsonl"
             eval_pack_json = run_dir / "model_eval_pack.json"
             eval_pack_md = run_dir / "model_eval_pack.md"
+            dataset_dir = run_dir / "dataset"
+            dataset_dir.mkdir(parents=True, exist_ok=True)
+            dataset_path = dataset_dir / "dataset_latest.jsonl"
+            dataset_summary_path = dataset_dir / "dataset_latest_summary.json"
+
+            dataset_cmd = [
+                self.config.python_bin,
+                str(self.config.build_dataset_script_path),
+                "--out-dir",
+                str(dataset_dir),
+                "--log",
+                str(self.config.log_path),
+                "--log-glob",
+                str(self.config.algo_repo_dir / "logs" / "*.log"),
+                "--cycles",
+                str(self.config.algo_repo_dir / "logs" / "auto_tuner" / "cycles.jsonl"),
+                "--run-context-dir",
+                str(self.config.run_context_dir),
+                "--position-index",
+                str(self.config.algo_repo_dir / "index" / "position_outcomes.json"),
+                "--trade-index",
+                str(self.config.algo_repo_dir / "index" / "trade_outcomes.json"),
+                "--min-rows",
+                "10",
+                "--max-unknown-sleeve-ratio",
+                "1.0",
+                "--allow-low-quality-dataset",
+            ]
+            dataset_completed = subprocess.run(
+                dataset_cmd,
+                cwd=self.config.algo_repo_dir,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=self.config.train_timeout_secs,
+            )
+            (logs_dir / "dataset.stdout.log").write_text(
+                dataset_completed.stdout, encoding="utf-8"
+            )
+            (logs_dir / "dataset.stderr.log").write_text(
+                dataset_completed.stderr, encoding="utf-8"
+            )
+            if dataset_completed.returncode != 0:
+                combined = f"{dataset_completed.stdout}\n{dataset_completed.stderr}"
+                quality_gate_failed = False
+                for blob in (dataset_completed.stdout, dataset_completed.stderr):
+                    blob = (blob or "").strip()
+                    if not blob:
+                        continue
+                    try:
+                        payload = json.loads(blob)
+                    except Exception:
+                        continue
+                    if str(payload.get("reason") or "").strip() == "dataset_quality_gate_failed":
+                        quality_gate_failed = True
+                        break
+                if not (quality_gate_failed and dataset_path.exists()):
+                    raise RuntimeError(
+                        f"dataset build failed ({dataset_completed.returncode}): {combined.strip()}"
+                    )
+            if dataset_summary_path.exists():
+                dataset_summary = _read_json(dataset_summary_path)
 
             train_cmd = [
                 self.config.python_bin,
                 str(self.config.train_script_path),
                 "--input",
-                str(self.config.dataset_path),
+                str(dataset_path),
                 "--output",
                 str(model_candidate),
                 "--shadow-index",
@@ -681,7 +760,11 @@ class PredictiveTrainerManager:
             (logs_dir / "train.stderr.log").write_text(completed.stderr, encoding="utf-8")
 
             candidate_attestation = self._build_attestation(
-                model_candidate, dataset_summary, model_candidate
+                model_candidate,
+                dataset_path,
+                dataset_summary,
+                dataset_summary_path,
+                model_candidate,
             )
             _write_json(training_candidate, candidate_attestation)
 
@@ -689,7 +772,7 @@ class PredictiveTrainerManager:
                 self.config.python_bin,
                 str(self.config.calibration_script_path),
                 "--dataset",
-                str(self.config.dataset_path),
+                str(dataset_path),
                 "--ledger",
                 str(ledger_candidate),
                 "--snapshot",
