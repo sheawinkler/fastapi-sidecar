@@ -20,7 +20,9 @@ import os
 import time
 import uuid
 from collections import OrderedDict, deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple, Union
 
@@ -83,6 +85,10 @@ _INFERENCE_CACHE_TTL_SECONDS = _env_int(
 )
 _inference_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _inference_cache_lock = asyncio.Lock()
+_INFERENCE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_env_int("SIDECAR_INFERENCE_EXECUTOR_WORKERS", 4, 1, 32),
+    thread_name_prefix="sidecar-infer",
+)
 
 
 def _prune_inference_cache_locked(now_ts: float) -> None:
@@ -143,6 +149,36 @@ def _append_jsonl(path: Path, record: Dict[str, Any]) -> None:
 
 async def _append_jsonl_async(path: Path, record: Dict[str, Any]) -> None:
     await asyncio.to_thread(_append_jsonl, path, record)
+
+
+async def _predict_with_executor(
+    *,
+    feature_vector: Optional[List[float]],
+    raw_features: Dict[str, Any],
+    model: Optional[str],
+) -> Dict[str, Any]:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _INFERENCE_EXECUTOR,
+        partial(
+            _inference_backend.predict,
+            feature_vector=feature_vector,
+            raw_features=raw_features,
+            model=model,
+        ),
+    )
+
+
+async def _calibrator_predict_with_executor(feature_vector: List[float]) -> Tuple[float, float]:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _INFERENCE_EXECUTOR,
+        partial(_calibrator.predict, feature_vector),
+    )
+
+
+def _shutdown_inference_executor() -> None:
+    _INFERENCE_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
 class StubEnsemble:
@@ -1240,7 +1276,7 @@ async def predict(req: PredictRequest) -> PredictResponse:
 
     # Run inference.
     try:
-        result = _inference_backend.predict(
+        result = await _predict_with_executor(
             feature_vector=feature_vector,
             raw_features=features,
             model=model,
@@ -1330,7 +1366,7 @@ async def predict(req: PredictRequest) -> PredictResponse:
 
         if compatible:
             try:
-                cal_score, cal_ret = _calibrator.predict(feature_vector)
+                cal_score, cal_ret = await _calibrator_predict_with_executor(feature_vector)
                 calibration["score_calibrated"] = cal_score
                 calibration["expected_return_calibrated"] = cal_ret
                 score_value = cal_score
@@ -1656,6 +1692,7 @@ async def bootstrap_signal_cache() -> None:
 @app.on_event("shutdown")
 async def shutdown_trainer_manager() -> None:
     await _trainer_manager.shutdown()
+    _shutdown_inference_executor()
 
 
 if __name__ == "__main__":  # pragma: no cover

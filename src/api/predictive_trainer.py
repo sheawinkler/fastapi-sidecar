@@ -7,8 +7,10 @@ import os
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -271,6 +273,7 @@ class PredictiveTrainerManager:
         self._active_run_id: str | None = None
         self._scheduler_task: asyncio.Task | None = None
         self._pending_restart: dict[str, Any] | None = None
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sidecar-trainer")
 
     async def start(self) -> None:
         if not self.config.scheduler_enabled:
@@ -285,6 +288,12 @@ class PredictiveTrainerManager:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._scheduler_task
             self._scheduler_task = None
+        if self._current_task:
+            self._current_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._current_task
+            self._current_task = None
+        self._executor.shutdown(wait=False, cancel_futures=True)
 
     async def _scheduler_loop(self) -> None:
         await asyncio.sleep(self.config.train_interval_secs)
@@ -307,6 +316,10 @@ class PredictiveTrainerManager:
 
     def _append_history(self, payload: dict[str, Any]) -> None:
         _append_jsonl(self.config.history_path, payload)
+
+    async def _run_sync_on_executor(self, func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, partial(func, *args, **kwargs))
 
     def _run_dir(self, run_id: str) -> Path:
         return self.config.runs_dir / run_id
@@ -627,6 +640,20 @@ class PredictiveTrainerManager:
             return {"status": "started", "run_id": run_id}
 
     async def _run_cycle(self, *, run_id: str, requested_by: str, auto_promote: bool | None) -> None:
+        try:
+            await self._run_sync_on_executor(
+                self._run_cycle_sync,
+                run_id=run_id,
+                requested_by=requested_by,
+                auto_promote=auto_promote,
+            )
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                self.config.lock_path.unlink()
+            self._active_run_id = None
+            self._current_task = None
+
+    def _run_cycle_sync(self, *, run_id: str, requested_by: str, auto_promote: bool | None) -> None:
         run_dir = self._run_dir(run_id)
         logs_dir = run_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
@@ -917,11 +944,6 @@ class PredictiveTrainerManager:
                     "message": str(exc),
                 }
             )
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                self.config.lock_path.unlink()
-            self._active_run_id = None
-            self._current_task = None
 
     def _promote_candidate(
         self,
@@ -1025,7 +1047,7 @@ class PredictiveTrainerManager:
             or not ledger_candidate.exists()
         ):
             raise FileNotFoundError(f"run {run_id} is missing candidate artifacts")
-        promotion = await asyncio.to_thread(
+        promotion = await self._run_sync_on_executor(
             self._promote_candidate,
             run_id=run_id,
             model_candidate=model_candidate,

@@ -138,6 +138,40 @@ def test_predict_vector_features_returns_score_and_schema(sidecar_server_module)
     assert body["metadata"].get("feature", {}).get("input_type") == "array"
 
 
+def test_predict_uses_inference_executor_helper(sidecar_server_module, monkeypatch: pytest.MonkeyPatch):
+    captured = {}
+
+    async def _fake_predict_with_executor(*, feature_vector, raw_features, model):
+        captured["feature_vector"] = feature_vector
+        captured["raw_features"] = raw_features
+        captured["model"] = model
+        return {
+            "prediction": 0.73,
+            "confidence": 0.61,
+            "expected_return": 0.02,
+            "model": model or "stub",
+        }
+
+    monkeypatch.setattr(sidecar_server_module, "_predict_with_executor", _fake_predict_with_executor)
+
+    payload = {
+        "token": "SOL/USDC",
+        "schema_version": "v1",
+        "features": [round(i * 0.1, 2) for i in range(1, 30)],
+    }
+
+    with TestClient(sidecar_server_module.app) as client:
+        resp = client.post("/predict", json=payload)
+        assert resp.status_code == 200
+        body = resp.json()
+
+    assert captured["model"] is None
+    assert isinstance(captured["feature_vector"], list)
+    assert len(captured["feature_vector"]) == 29
+    assert captured["raw_features"] == payload["features"]
+    assert body["metadata"]["model"] == "stub"
+
+
 def test_predict_dict_features_warns_legacy(sidecar_server_module):
     payload = {
         "token": "SOL/USDC",

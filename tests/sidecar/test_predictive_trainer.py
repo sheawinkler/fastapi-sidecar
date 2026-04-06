@@ -123,6 +123,26 @@ async def test_start_run_prevents_overlap(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
+async def test_run_cycle_offloads_sync_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    captured: dict[str, object] = {}
+
+    async def _fake_run_sync_on_executor(func, /, *args, **kwargs):
+        captured["func_name"] = getattr(func, "__name__", "")
+        captured["kwargs"] = kwargs
+        return None
+
+    monkeypatch.setattr(manager, "_run_sync_on_executor", _fake_run_sync_on_executor)
+
+    await manager._run_cycle(run_id="run-offload", requested_by="manual", auto_promote=None)
+
+    assert captured["func_name"] == "_run_cycle_sync"
+    assert captured["kwargs"]["run_id"] == "run-offload"
+    assert manager._active_run_id is None
+    assert manager._current_task is None
+
+
+@pytest.mark.asyncio
 async def test_promote_run_updates_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     run_id = "run-123"
@@ -158,6 +178,48 @@ async def test_promote_run_updates_manifest(tmp_path: Path, monkeypatch: pytest.
 
     assert result["state"] == "promoted_pending_restart"
     assert updated["promotion"]["state"] == "promoted_pending_restart"
+
+
+@pytest.mark.asyncio
+async def test_promote_run_uses_executor_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    run_id = "run-executor"
+    run_dir = manager._run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    model_path = run_dir / "model_candidate.json"
+    training_path = run_dir / "prelaunch_training_candidate.json"
+    calibration_path = run_dir / "calibration_candidate.json"
+    ledger_path = run_dir / "next_state_ledger_candidate.jsonl"
+    for path in (model_path, training_path, calibration_path):
+        path.write_text("{}", encoding="utf-8")
+    ledger_path.write_text('{"row":1}\n', encoding="utf-8")
+
+    manager._write_manifest(
+        run_id,
+        {
+            "run_id": run_id,
+            "artifacts": {
+                "candidate_model": str(model_path),
+                "candidate_training": str(training_path),
+                "candidate_calibration": str(calibration_path),
+                "candidate_ledger": str(ledger_path),
+            },
+            "promotion": {"state": "not_attempted"},
+        },
+    )
+
+    captured: dict[str, object] = {}
+
+    async def _fake_run_sync_on_executor(func, /, *args, **kwargs):
+        captured["func_name"] = getattr(func, "__name__", "")
+        return {"state": "promoted_pending_restart", "forced": True}
+
+    monkeypatch.setattr(manager, "_run_sync_on_executor", _fake_run_sync_on_executor)
+
+    result = await manager.promote_run(run_id, forced=True)
+
+    assert captured["func_name"] == "_promote_candidate"
+    assert result["state"] == "promoted_pending_restart"
 
 
 def test_promote_candidate_copies_next_state_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
