@@ -973,12 +973,15 @@ class PredictiveTrainerManager:
         restart_log = self._run_dir(run_id) / "logs" / "restart.stdout.log"
         restart_err = self._run_dir(run_id) / "logs" / "restart.stderr.log"
         try:
+            restart_env = os.environ.copy()
+            restart_env["DEPLOY_WRAPPER_REPLACE_EXISTING"] = "1"
             deploy_completed = subprocess.run(
                 [str(self.config.deploy_script_path), "--live", "--skip-build"],
                 cwd=self.config.algo_repo_dir,
                 check=True,
                 capture_output=True,
                 text=True,
+                env=restart_env,
             )
             restart_log.write_text(deploy_completed.stdout, encoding="utf-8")
             restart_err.write_text(deploy_completed.stderr, encoding="utf-8")
