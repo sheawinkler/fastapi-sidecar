@@ -256,3 +256,5 @@ def test_promote_candidate_relaunch_uses_wrapper_replace_env(tmp_path: Path, mon
     assert result["state"] == "promoted_and_relaunched"
     assert captured["cmd"] == [str(manager.config.deploy_script_path), "--live", "--skip-build"]
     assert captured["env"]["DEPLOY_WRAPPER_REPLACE_EXISTING"] == "1"
+    assert captured["env"]["ALGOTRADER_WALLET"] == str(manager.config.wallet_path)
+    assert "REAL_ALGOTRADER_WALLET" not in captured["env"]

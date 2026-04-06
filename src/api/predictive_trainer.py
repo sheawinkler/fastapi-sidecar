@@ -176,6 +176,10 @@ class PredictiveTrainerConfig:
         return self.algo_repo_dir / "scripts/deploy_live.sh"
 
     @property
+    def wallet_path(self) -> Path:
+        return self.algo_repo_dir / "wallet_mainnet.json"
+
+    @property
     def build_dataset_script_path(self) -> Path:
         return self.algo_repo_dir / "scripts/build_mc_dataset.py"
 
@@ -975,6 +979,8 @@ class PredictiveTrainerManager:
         try:
             restart_env = os.environ.copy()
             restart_env["DEPLOY_WRAPPER_REPLACE_EXISTING"] = "1"
+            restart_env["ALGOTRADER_WALLET"] = str(self.config.wallet_path)
+            restart_env.pop("REAL_ALGOTRADER_WALLET", None)
             deploy_completed = subprocess.run(
                 [str(self.config.deploy_script_path), "--live", "--skip-build"],
                 cwd=self.config.algo_repo_dir,
