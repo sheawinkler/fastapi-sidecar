@@ -257,4 +257,6 @@ def test_promote_candidate_relaunch_uses_wrapper_replace_env(tmp_path: Path, mon
     assert captured["cmd"] == [str(manager.config.deploy_script_path), "--live", "--skip-build"]
     assert captured["env"]["DEPLOY_WRAPPER_REPLACE_EXISTING"] == "1"
     assert captured["env"]["ALGOTRADER_WALLET"] == str(manager.config.wallet_path)
+    assert captured["env"]["SIDECAR_REQUIRE_HEALTH"] == "0"
+    assert captured["env"]["SIDECAR_SKIP_POST_LAUNCH_TRAINER_TRIGGER"] == "1"
     assert "REAL_ALGOTRADER_WALLET" not in captured["env"]

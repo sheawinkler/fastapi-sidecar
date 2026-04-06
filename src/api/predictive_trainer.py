@@ -980,6 +980,10 @@ class PredictiveTrainerManager:
             restart_env = os.environ.copy()
             restart_env["DEPLOY_WRAPPER_REPLACE_EXISTING"] = "1"
             restart_env["ALGOTRADER_WALLET"] = str(self.config.wallet_path)
+            # A sidecar-owned relaunch should not block on curling the same sidecar,
+            # and it should not immediately retrigger the trainer on success.
+            restart_env["SIDECAR_REQUIRE_HEALTH"] = "0"
+            restart_env["SIDECAR_SKIP_POST_LAUNCH_TRAINER_TRIGGER"] = "1"
             restart_env.pop("REAL_ALGOTRADER_WALLET", None)
             deploy_completed = subprocess.run(
                 [str(self.config.deploy_script_path), "--live", "--skip-build"],
