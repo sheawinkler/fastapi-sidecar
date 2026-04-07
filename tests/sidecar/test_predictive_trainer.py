@@ -17,11 +17,13 @@ def _make_config(tmp_path: Path) -> PredictiveTrainerConfig:
         algo_repo_dir=algo_repo,
         data_dir=tmp_path / "sidecar_data",
         train_interval_secs=600,
+        scheduler_poll_secs=30,
         scheduler_enabled=False,
         auto_promote=True,
         relaunch_enabled=True,
         python_bin="python3",
         train_timeout_secs=1800,
+        min_new_shadow_rows_to_trigger=100,
         positive_share_collapse_tolerance=0.05,
         calibration_mae_degradation_factor=1.25,
         p_positive_brier_degradation_factor=1.25,
@@ -35,12 +37,16 @@ def test_from_env_accepts_numeric_truthy_flags(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_ENABLED", "1")
     monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_AUTO_PROMOTE", "yes")
     monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_RELAUNCH_ENABLED", "on")
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_POLL_SECS", "45")
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_MIN_NEW_SHADOW_ROWS", "125")
 
     config = PredictiveTrainerConfig.from_env(tmp_path / "data")
 
     assert config.scheduler_enabled is True
     assert config.auto_promote is True
     assert config.relaunch_enabled is True
+    assert config.scheduler_poll_secs == 45
+    assert config.min_new_shadow_rows_to_trigger == 125
 
 
 def test_evaluate_candidate_accepts_improvement(tmp_path: Path):
@@ -120,6 +126,52 @@ async def test_start_run_prevents_overlap(tmp_path: Path, monkeypatch: pytest.Mo
 
     release.set()
     await asyncio.wait_for(manager._current_task, timeout=1.0)
+
+
+def test_scheduler_trigger_prefers_row_threshold(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager._write_scheduler_state(
+        {
+            "last_run_id": "run-old",
+            "last_requested_by": "scheduler_interval",
+            "last_run_started_at": "2026-04-07T00:00:00Z",
+            "last_trigger_reason": "scheduler_interval",
+            "last_trigger_shadow_entry_count": 40,
+        }
+    )
+    manager.config.shadow_index_path.write_text(
+        json.dumps([{"row": idx} for idx in range(150)]), encoding="utf-8"
+    )
+
+    trigger = manager._scheduler_trigger_payload()
+
+    assert trigger["should_start"] is True
+    assert trigger["requested_by"] == "scheduler_row_threshold"
+    assert trigger["new_shadow_rows_since_trigger"] == 110
+    assert trigger["row_threshold_reached"] is True
+
+
+def test_scheduler_trigger_uses_interval_when_row_threshold_not_met(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager._write_scheduler_state(
+        {
+            "last_run_id": "run-old",
+            "last_requested_by": "scheduler_interval",
+            "last_run_started_at": "2026-04-07T00:00:00Z",
+            "last_trigger_reason": "scheduler_interval",
+            "last_trigger_shadow_entry_count": 50,
+        }
+    )
+    manager.config.shadow_index_path.write_text(
+        json.dumps([{"row": idx} for idx in range(80)]), encoding="utf-8"
+    )
+
+    trigger = manager._scheduler_trigger_payload()
+
+    assert trigger["should_start"] is True
+    assert trigger["requested_by"] == "scheduler_interval"
+    assert trigger["new_shadow_rows_since_trigger"] == 30
+    assert trigger["row_threshold_reached"] is False
 
 
 @pytest.mark.asyncio
