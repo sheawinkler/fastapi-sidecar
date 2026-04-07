@@ -349,6 +349,74 @@ class PredictiveTrainerManager:
     def is_running(self) -> bool:
         return self._current_task is not None and not self._current_task.done()
 
+    def _terminal_manifest_status(self, status: Any) -> bool:
+        return str(status or "").strip().lower() in {"completed", "failed", "cancelled"}
+
+    def _read_manifest_if_exists(self, run_id: str | None) -> dict[str, Any] | None:
+        if not run_id:
+            return None
+        path = self._manifest_path(run_id)
+        if not path.exists():
+            return None
+        try:
+            payload = _read_json(path)
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _reconcile_run_state(self) -> dict[str, Any]:
+        reconciliation = {
+            "stale_running_state": False,
+            "stale_reason": None,
+        }
+
+        if self._current_task is not None and self._current_task.done():
+            self._current_task = None
+
+        active_manifest = self._read_manifest_if_exists(self._active_run_id)
+        if (
+            self._current_task is not None
+            and not self._current_task.done()
+            and active_manifest is not None
+            and self._terminal_manifest_status(active_manifest.get("status"))
+            and not self.config.lock_path.exists()
+        ):
+            self._current_task = None
+            self._active_run_id = None
+            reconciliation["stale_running_state"] = True
+            reconciliation["stale_reason"] = "terminal_manifest_without_lock"
+
+        latest_manifest = self._latest_manifest_summary()
+        if (
+            self._current_task is None
+            and latest_manifest is not None
+            and str(latest_manifest.get("status") or "").strip().lower() == "running"
+            and not self.config.lock_path.exists()
+        ):
+            latest_run_id = str(latest_manifest.get("run_id") or "").strip()
+            latest_manifest["status"] = "failed"
+            latest_manifest["completed_at"] = _utc_iso()
+            latest_manifest["error"] = {
+                "type": "StaleRunState",
+                "message": "reconciled running manifest without live task or lock",
+            }
+            if latest_run_id:
+                self._write_manifest(latest_run_id, latest_manifest)
+            self._append_history(
+                {
+                    "timestamp": _utc_iso(),
+                    "event": "trainer_run_reconciled_stale_state",
+                    "run_id": latest_run_id or None,
+                    "reason": "running_manifest_without_lock",
+                }
+            )
+            if self._active_run_id == latest_run_id:
+                self._active_run_id = None
+            reconciliation["stale_running_state"] = True
+            reconciliation["stale_reason"] = "running_manifest_without_lock"
+
+        return reconciliation
+
     def _append_history(self, payload: dict[str, Any]) -> None:
         _append_jsonl(self.config.history_path, payload)
 
@@ -450,6 +518,7 @@ class PredictiveTrainerManager:
         _write_json(self.config.scheduler_state_path, payload)
 
     def _scheduler_trigger_payload(self) -> dict[str, Any]:
+        reconciliation = self._reconcile_run_state()
         state = self._read_scheduler_state()
         current_shadow_entry_count = _count_json_array_entries(self.config.shadow_index_path)
         last_trigger_shadow_entry_count = _safe_int(
@@ -489,6 +558,8 @@ class PredictiveTrainerManager:
             "should_start": should_start,
             "requested_by": requested_by,
             "reason": reason,
+            "stale_running_state": reconciliation["stale_running_state"],
+            "stale_reason": reconciliation["stale_reason"],
             "current_shadow_entry_count": current_shadow_entry_count,
             "last_trigger_shadow_entry_count": last_trigger_shadow_entry_count,
             "new_shadow_rows_since_trigger": new_shadow_rows_since_trigger,
@@ -780,6 +851,7 @@ class PredictiveTrainerManager:
         auto_promote: bool | None,
     ) -> dict[str, Any]:
         async with self._lock:
+            self._reconcile_run_state()
             if self.is_running():
                 return {
                     "status": "already_running",
@@ -1163,21 +1235,26 @@ class PredictiveTrainerManager:
             restart_env["SIDECAR_REQUIRE_HEALTH"] = "0"
             restart_env["SIDECAR_SKIP_POST_LAUNCH_TRAINER_TRIGGER"] = "1"
             restart_env.pop("REAL_ALGOTRADER_WALLET", None)
-            deploy_completed = subprocess.run(
-                [str(self.config.deploy_script_path), "--live", "--skip-build"],
-                cwd=self.config.algo_repo_dir,
-                check=True,
-                capture_output=True,
-                text=True,
-                env=restart_env,
-            )
-            restart_log.write_text(deploy_completed.stdout, encoding="utf-8")
-            restart_err.write_text(deploy_completed.stderr, encoding="utf-8")
-            promotion["state"] = "promoted_and_relaunched"
+            restart_log.parent.mkdir(parents=True, exist_ok=True)
+            with restart_log.open("w", encoding="utf-8") as stdout_fh, restart_err.open(
+                "w", encoding="utf-8"
+            ) as stderr_fh:
+                restart_process = subprocess.Popen(
+                    [str(self.config.deploy_script_path), "--live", "--skip-build"],
+                    cwd=self.config.algo_repo_dir,
+                    stdout=stdout_fh,
+                    stderr=stderr_fh,
+                    text=True,
+                    env=restart_env,
+                    start_new_session=True,
+                )
+            promotion["state"] = "promoted_and_relaunch_requested"
+            promotion["restart_pid"] = restart_process.pid
+            promotion["restart_dispatch"] = "detached_wrapper"
             self._pending_restart = None
-        except subprocess.CalledProcessError as exc:
-            restart_log.write_text(exc.stdout or "", encoding="utf-8")
-            restart_err.write_text(exc.stderr or "", encoding="utf-8")
+        except Exception as exc:
+            restart_log.write_text("", encoding="utf-8")
+            restart_err.write_text(str(exc), encoding="utf-8")
             promotion["state"] = "promoted_restart_failed"
             promotion["restart_error"] = str(exc)
             self._pending_restart = {
@@ -1228,7 +1305,34 @@ class PredictiveTrainerManager:
         )
         return promotion
 
+    def _freshness_payload(self) -> dict[str, Any]:
+        reconciliation = self._reconcile_run_state()
+        active_model = self._active_artifacts()
+        active_model_shadow_rows = _safe_int(active_model.get("shadow_rows"), 0)
+        trigger = self._scheduler_trigger_payload()
+        current_shadow_entry_count = _safe_int(trigger.get("current_shadow_entry_count"), 0)
+        new_shadow_rows_since_trigger = _safe_int(trigger.get("new_shadow_rows_since_trigger"), 0)
+        shadow_row_lag = max(0, current_shadow_entry_count - active_model_shadow_rows)
+        if shadow_row_lag <= 0:
+            model_freshness_state = "current"
+        elif reconciliation["stale_running_state"]:
+            model_freshness_state = "stuck_running_state"
+        elif self.is_running():
+            model_freshness_state = "running_catching_up"
+        else:
+            model_freshness_state = "pending_retrain"
+        return {
+            "active_model_trained_at": active_model.get("trained_at"),
+            "active_model_shadow_rows": active_model_shadow_rows,
+            "current_shadow_entry_count": current_shadow_entry_count,
+            "new_shadow_rows_since_trigger": new_shadow_rows_since_trigger,
+            "shadow_row_lag_vs_active_model": shadow_row_lag,
+            "model_freshness_state": model_freshness_state,
+        }
+
     def health_payload(self) -> dict[str, Any]:
+        self._reconcile_run_state()
+        freshness = self._freshness_payload()
         return {
             "status": "ok",
             "scheduler_enabled": self.config.scheduler_enabled,
@@ -1248,10 +1352,13 @@ class PredictiveTrainerManager:
             "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
             "pending_restart": self._pending_restart,
             "scheduler_trigger": self._scheduler_trigger_payload(),
+            **freshness,
         }
 
     def status_payload(self) -> dict[str, Any]:
+        self._reconcile_run_state()
         manifest = self._read_manifest(self._active_run_id) if self._active_run_id else None
+        freshness = self._freshness_payload()
         return {
             "status": "running" if self.is_running() else "idle",
             "active_run_id": self._active_run_id,
@@ -1260,6 +1367,7 @@ class PredictiveTrainerManager:
             "active_model": self._active_artifacts(),
             "latest_run_context": self._latest_run_context_path(),
             "scheduler_trigger": self._scheduler_trigger_payload(),
+            **freshness,
         }
 
     def history_payload(self, limit: int = 25) -> dict[str, Any]:
