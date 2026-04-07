@@ -455,6 +455,26 @@ class PredictiveTrainerManager:
                 await self._scheduler_task
             self._scheduler_task = None
         if self._current_task:
+            active_manifest = self._read_manifest_if_exists(self._active_run_id)
+            if (
+                self._active_run_id
+                and active_manifest is not None
+                and not self._terminal_manifest_status(active_manifest.get("status"))
+            ):
+                active_manifest["status"] = "cancelled"
+                active_manifest["completed_at"] = _utc_iso()
+                active_manifest["error"] = {
+                    "type": "TrainerShutdown",
+                    "message": "sidecar shutdown cancelled in-progress trainer run",
+                }
+                self._write_manifest(self._active_run_id, active_manifest)
+                self._append_history(
+                    {
+                        "timestamp": _utc_iso(),
+                        "event": "trainer_run_cancelled_shutdown",
+                        "run_id": self._active_run_id,
+                    }
+                )
             self._current_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._current_task
@@ -598,7 +618,7 @@ class PredictiveTrainerManager:
         )
         return str(files[0]) if files else None
 
-    def _latest_manifest_summary(self) -> dict[str, Any] | None:
+    def _latest_manifest_summary(self, *, status: str | None = None) -> dict[str, Any] | None:
         manifests = sorted(
             self.config.runs_dir.glob("*/manifest.json"),
             key=lambda path: path.stat().st_mtime,
@@ -609,8 +629,11 @@ class PredictiveTrainerManager:
                 payload = _read_json(path)
             except Exception:
                 continue
-            if isinstance(payload, dict):
-                return payload
+            if not isinstance(payload, dict):
+                continue
+            if status is not None and str(payload.get("status") or "").strip().lower() != status:
+                continue
+            return payload
         return None
 
     def _default_scheduler_state(self) -> dict[str, Any]:
@@ -838,6 +861,7 @@ class PredictiveTrainerManager:
                 training_section.get("rows"), _safe_int(data_quality.get("row_count"), 0)
             ),
             "shadow_rows": _safe_int(training_section.get("shadow_rows"), 0),
+            "raw_shadow_entry_count": _safe_int(training_section.get("raw_shadow_entry_count"), 0),
             "executed_rows": _safe_int(training_section.get("executed_rows"), 0),
             "positive_rows": _safe_int(
                 validation_section.get("positive_rows"),
@@ -928,6 +952,9 @@ class PredictiveTrainerManager:
                 "output": str(candidate_output_hint),
                 "reason_groups": ["dead_timeout", "trailing_stop", "liquidity_collapse", "stop_loss", "other"],
                 "rows": _safe_int(training_window.get("rows"), _safe_int(data_quality.get("row_count"), 0)),
+                "raw_shadow_entry_count": _safe_int(
+                    self._shadow_index_stats_cache.get("current_shadow_entry_count"), 0
+                ),
                 "shadow_rows": _safe_int(
                     training_window.get("shadow_rows"),
                     _safe_int(shadow_quality.get("row_count"), 0),
@@ -1474,12 +1501,34 @@ class PredictiveTrainerManager:
         reconciliation = self._reconcile_run_state()
         active_model = self._active_artifacts()
         active_model_shadow_rows = _safe_int(active_model.get("shadow_rows"), 0)
+        active_model_raw_shadow_entry_count = _safe_int(active_model.get("raw_shadow_entry_count"), 0)
         trigger = self._scheduler_trigger_payload()
         current_shadow_entry_count = _safe_int(trigger.get("current_shadow_entry_count"), 0)
         new_shadow_rows_since_trigger = _safe_int(trigger.get("new_shadow_rows_since_trigger"), 0)
-        shadow_row_lag = max(0, current_shadow_entry_count - active_model_shadow_rows)
-        if shadow_row_lag <= 0:
+        latest_manifest = self._latest_manifest_summary(status="completed") or {}
+        latest_completed_run_id = str(latest_manifest.get("run_id") or "").strip() or None
+        latest_completed_run_status = str(latest_manifest.get("status") or "").strip() or None
+        latest_completed_run_raw_shadow_entry_count = _safe_int(
+            latest_manifest.get("raw_shadow_entry_count"), 0
+        )
+        latest_completed_promotion = latest_manifest.get("promotion") or {}
+        latest_completed_promotion_state = (
+            str(latest_completed_promotion.get("state") or "").strip() or None
+        )
+        lag_baseline = (
+            active_model_raw_shadow_entry_count
+            if active_model_raw_shadow_entry_count > 0
+            else active_model_shadow_rows
+        )
+        shadow_row_lag = max(0, current_shadow_entry_count - lag_baseline)
+        if active_model_raw_shadow_entry_count > 0 and shadow_row_lag <= 0:
             model_freshness_state = "current"
+        elif (
+            latest_completed_run_status == "completed"
+            and latest_completed_run_raw_shadow_entry_count >= current_shadow_entry_count
+            and latest_completed_promotion_state == "gated_off"
+        ):
+            model_freshness_state = "current_gated_no_change"
         elif reconciliation["stale_running_state"]:
             model_freshness_state = "stuck_running_state"
         elif self.is_running():
@@ -1489,9 +1538,14 @@ class PredictiveTrainerManager:
         return {
             "active_model_trained_at": active_model.get("trained_at"),
             "active_model_shadow_rows": active_model_shadow_rows,
+            "active_model_raw_shadow_entry_count": active_model_raw_shadow_entry_count,
             "current_shadow_entry_count": current_shadow_entry_count,
             "new_shadow_rows_since_trigger": new_shadow_rows_since_trigger,
             "shadow_row_lag_vs_active_model": shadow_row_lag,
+            "latest_completed_run_id": latest_completed_run_id,
+            "latest_completed_run_status": latest_completed_run_status,
+            "latest_completed_run_raw_shadow_entry_count": latest_completed_run_raw_shadow_entry_count,
+            "latest_completed_promotion_state": latest_completed_promotion_state,
             "model_freshness_state": model_freshness_state,
         }
 
@@ -1533,6 +1587,9 @@ class PredictiveTrainerManager:
             "pending_restart": self._pending_restart,
             "active_model": self._active_artifacts(),
             "latest_run_context": self._latest_run_context_path(),
+            "shadow_index_path": str(self.config.shadow_sqlite_path),
+            "shadow_index_legacy_path": str(self.config.shadow_index_path),
+            "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
             "scheduler_trigger": self._scheduler_trigger_payload(),
             **freshness,
         }

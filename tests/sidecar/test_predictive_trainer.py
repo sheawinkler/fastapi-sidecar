@@ -298,6 +298,72 @@ def test_health_payload_reports_model_freshness_state(tmp_path: Path):
     assert payload["model_freshness_state"] == "pending_retrain"
 
 
+def test_health_payload_reports_current_when_latest_run_gated_no_change(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager.config.training_path.write_text(
+        json.dumps(
+            {
+                "training": {"rows": 200, "shadow_rows": 200, "executed_rows": 1},
+                "validation": {
+                    "positive_rows": 120,
+                    "negative_rows": 80,
+                    "trained_at": "2026-04-07T03:38:24.484862Z",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager.config.model_path.write_text("{}", encoding="utf-8")
+    manager.config.calibration_path.write_text(json.dumps({"rows": 10}), encoding="utf-8")
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 260)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+    manager._write_scheduler_state(
+        {
+            "last_run_id": "run-current",
+            "last_requested_by": "scheduler_interval",
+            "last_run_started_at": "2026-04-07T00:00:00Z",
+            "last_trigger_reason": "scheduler_interval",
+            "last_trigger_shadow_entry_count": 260,
+        }
+    )
+    manager._write_manifest(
+        "run-current",
+        {
+            "run_id": "run-current",
+            "status": "completed",
+            "raw_shadow_entry_count": 260,
+            "promotion": {
+                "state": "gated_off",
+                "gate_result": {
+                    "ok": False,
+                    "issues": ["training_rows_not_improved", "shadow_rows_not_improved"],
+                },
+            },
+        },
+    )
+    manager._write_manifest(
+        "run-later-failed",
+        {
+            "run_id": "run-later-failed",
+            "status": "failed",
+            "raw_shadow_entry_count": 260,
+            "promotion": {"state": "not_attempted"},
+            "error": {
+                "type": "StaleRunState",
+                "message": "reconciled running manifest without live task or lock",
+            },
+        },
+    )
+
+    payload = manager.health_payload()
+
+    assert payload["latest_completed_run_id"] == "run-current"
+    assert payload["latest_completed_run_raw_shadow_entry_count"] == 260
+    assert payload["latest_completed_promotion_state"] == "gated_off"
+    assert payload["model_freshness_state"] == "current_gated_no_change"
+    assert payload["shadow_row_lag_vs_active_model"] == 60
+
+
 def test_health_payload_uses_cached_sqlite_stats_not_json_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 333)
@@ -309,6 +375,16 @@ def test_health_payload_uses_cached_sqlite_stats_not_json_count(tmp_path: Path, 
     assert payload["current_shadow_entry_count"] == 333
     assert payload["scheduler_trigger"]["shadow_index_count_cached"] is True
     assert payload["scheduler_trigger"]["shadow_index_count_error"] is None
+
+
+def test_status_payload_reports_shadow_store_paths(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+
+    payload = manager.status_payload()
+
+    assert payload["shadow_index_path"] == str(manager.config.shadow_sqlite_path)
+    assert payload["shadow_index_legacy_path"] == str(manager.config.shadow_index_path)
+    assert payload["shadow_duckdb_path"] == str(manager.config.shadow_duckdb_path)
 
 
 @pytest.mark.asyncio
@@ -329,6 +405,30 @@ async def test_run_cycle_offloads_sync_work(tmp_path: Path, monkeypatch: pytest.
     assert captured["kwargs"]["run_id"] == "run-offload"
     assert manager._active_run_id is None
     assert manager._current_task is None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_marks_running_manifest_cancelled(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    run_id = "run-shutdown"
+    manager._active_run_id = run_id
+    manager._write_manifest(
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "running",
+            "started_at": "2026-04-07T00:00:00Z",
+        },
+    )
+    manager.config.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    manager.config.lock_path.write_text("{}", encoding="utf-8")
+    manager._current_task = asyncio.create_task(asyncio.sleep(3600))
+
+    await manager.shutdown()
+
+    manifest = manager._read_manifest(run_id)
+    assert manifest["status"] == "cancelled"
+    assert manifest["error"]["type"] == "TrainerShutdown"
 
 
 @pytest.mark.asyncio
