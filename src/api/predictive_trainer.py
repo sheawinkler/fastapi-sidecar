@@ -38,6 +38,23 @@ def _safe_float(value: Any, default: float | None = None) -> float | None:
         return default
 
 
+def _parse_utc_ts(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -116,11 +133,13 @@ class PredictiveTrainerConfig:
     algo_repo_dir: Path
     data_dir: Path
     train_interval_secs: int
+    scheduler_poll_secs: int
     scheduler_enabled: bool
     auto_promote: bool
     relaunch_enabled: bool
     python_bin: str
     train_timeout_secs: int
+    min_new_shadow_rows_to_trigger: int
     positive_share_collapse_tolerance: float
     calibration_mae_degradation_factor: float
     p_positive_brier_degradation_factor: float
@@ -136,6 +155,10 @@ class PredictiveTrainerConfig:
     @property
     def lock_path(self) -> Path:
         return self.data_dir / "trainer" / "lock" / "train.lock"
+
+    @property
+    def scheduler_state_path(self) -> Path:
+        return self.data_dir / "trainer" / "scheduler_state.json"
 
     @property
     def model_path(self) -> Path:
@@ -222,6 +245,9 @@ class PredictiveTrainerConfig:
             train_interval_secs=max(
                 60, _safe_int(os.getenv("SIDECAR_PREDICTIVE_TRAINER_INTERVAL_SECS"), 600)
             ),
+            scheduler_poll_secs=max(
+                15, _safe_int(os.getenv("SIDECAR_PREDICTIVE_TRAINER_POLL_SECS"), 30)
+            ),
             scheduler_enabled=_env_bool("SIDECAR_PREDICTIVE_TRAINER_ENABLED", False),
             auto_promote=_env_bool("SIDECAR_PREDICTIVE_TRAINER_AUTO_PROMOTE", True),
             relaunch_enabled=_env_bool("SIDECAR_PREDICTIVE_TRAINER_RELAUNCH_ENABLED", True),
@@ -231,6 +257,12 @@ class PredictiveTrainerConfig:
             or sys.executable,
             train_timeout_secs=max(
                 300, _safe_int(os.getenv("SIDECAR_PREDICTIVE_TRAINER_TIMEOUT_SECS"), 1800)
+            ),
+            min_new_shadow_rows_to_trigger=max(
+                1,
+                _safe_int(
+                    os.getenv("SIDECAR_PREDICTIVE_TRAINER_MIN_NEW_SHADOW_ROWS"), 100
+                ),
             ),
             positive_share_collapse_tolerance=max(
                 0.0,
@@ -296,11 +328,14 @@ class PredictiveTrainerManager:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     async def _scheduler_loop(self) -> None:
-        await asyncio.sleep(self.config.train_interval_secs)
         while True:
             try:
-                if not self.is_running():
-                    await self.start_run(requested_by="scheduler", auto_promote=None)
+                trigger = self._scheduler_trigger_payload()
+                if trigger.get("should_start"):
+                    await self.start_run(
+                        requested_by=str(trigger.get("requested_by") or "scheduler_interval"),
+                        auto_promote=None,
+                    )
             except Exception:
                 self._append_history(
                     {
@@ -309,7 +344,7 @@ class PredictiveTrainerManager:
                         "message": "trainer scheduler cycle failed",
                     }
                 )
-            await asyncio.sleep(self.config.train_interval_secs)
+            await asyncio.sleep(self.config.scheduler_poll_secs)
 
     def is_running(self) -> bool:
         return self._current_task is not None and not self._current_task.done()
@@ -359,6 +394,124 @@ class PredictiveTrainerManager:
             reverse=True,
         )
         return str(files[0]) if files else None
+
+    def _latest_manifest_summary(self) -> dict[str, Any] | None:
+        manifests = sorted(
+            self.config.runs_dir.glob("*/manifest.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for path in manifests:
+            try:
+                payload = _read_json(path)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                return payload
+        return None
+
+    def _default_scheduler_state(self) -> dict[str, Any]:
+        current_shadow_entries = _count_json_array_entries(self.config.shadow_index_path)
+        latest_manifest = self._latest_manifest_summary()
+        if latest_manifest:
+            return {
+                "last_run_id": latest_manifest.get("run_id"),
+                "last_requested_by": latest_manifest.get("requested_by"),
+                "last_run_started_at": latest_manifest.get("started_at") or _utc_iso(),
+                "last_trigger_reason": "bootstrap_latest_manifest",
+                "last_trigger_shadow_entry_count": _safe_int(
+                    latest_manifest.get("raw_shadow_entry_count"), current_shadow_entries
+                ),
+            }
+        return {
+            "last_run_id": None,
+            "last_requested_by": None,
+            "last_run_started_at": _utc_iso(),
+            "last_trigger_reason": "bootstrap_current_shadow_index",
+            "last_trigger_shadow_entry_count": current_shadow_entries,
+        }
+
+    def _read_scheduler_state(self) -> dict[str, Any]:
+        path = self.config.scheduler_state_path
+        if path.exists():
+            try:
+                payload = _read_json(path)
+            except Exception:
+                payload = self._default_scheduler_state()
+                _write_json(path, payload)
+                return payload
+            if isinstance(payload, dict):
+                return payload
+        payload = self._default_scheduler_state()
+        _write_json(path, payload)
+        return payload
+
+    def _write_scheduler_state(self, payload: dict[str, Any]) -> None:
+        _write_json(self.config.scheduler_state_path, payload)
+
+    def _scheduler_trigger_payload(self) -> dict[str, Any]:
+        state = self._read_scheduler_state()
+        current_shadow_entry_count = _count_json_array_entries(self.config.shadow_index_path)
+        last_trigger_shadow_entry_count = _safe_int(
+            state.get("last_trigger_shadow_entry_count"), current_shadow_entry_count
+        )
+        new_shadow_rows_since_trigger = max(
+            0, current_shadow_entry_count - last_trigger_shadow_entry_count
+        )
+        last_run_started_at = str(state.get("last_run_started_at") or "").strip() or None
+        last_started_dt = _parse_utc_ts(last_run_started_at)
+        seconds_since_last_run_started: float | None = None
+        if last_started_dt is not None:
+            seconds_since_last_run_started = max(
+                0.0, (_utc_now() - last_started_dt).total_seconds()
+            )
+        interval_elapsed = (
+            seconds_since_last_run_started is None
+            or seconds_since_last_run_started >= self.config.train_interval_secs
+        )
+        row_threshold_reached = (
+            new_shadow_rows_since_trigger >= self.config.min_new_shadow_rows_to_trigger
+        )
+        requested_by: str | None = None
+        reason = "waiting"
+        should_start = False
+        if self.is_running():
+            reason = "already_running"
+        elif row_threshold_reached:
+            reason = "row_threshold"
+            requested_by = "scheduler_row_threshold"
+            should_start = True
+        elif interval_elapsed:
+            reason = "interval"
+            requested_by = "scheduler_interval"
+            should_start = True
+        return {
+            "should_start": should_start,
+            "requested_by": requested_by,
+            "reason": reason,
+            "current_shadow_entry_count": current_shadow_entry_count,
+            "last_trigger_shadow_entry_count": last_trigger_shadow_entry_count,
+            "new_shadow_rows_since_trigger": new_shadow_rows_since_trigger,
+            "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
+            "interval_elapsed": interval_elapsed,
+            "row_threshold_reached": row_threshold_reached,
+            "seconds_since_last_run_started": seconds_since_last_run_started,
+            "last_run_id": state.get("last_run_id"),
+            "last_requested_by": state.get("last_requested_by"),
+            "last_trigger_reason": state.get("last_trigger_reason"),
+        }
+
+    def _mark_scheduler_trigger(self, *, run_id: str, requested_by: str) -> None:
+        trigger = self._scheduler_trigger_payload()
+        self._write_scheduler_state(
+            {
+                "last_run_id": run_id,
+                "last_requested_by": requested_by,
+                "last_run_started_at": _utc_iso(),
+                "last_trigger_reason": requested_by,
+                "last_trigger_shadow_entry_count": trigger.get("current_shadow_entry_count"),
+            }
+        )
 
     def _current_open_positions(self, work_dir: Path) -> dict[str, Any]:
         started_at = self._latest_run_context_started_at()
@@ -633,6 +786,7 @@ class PredictiveTrainerManager:
                     "run_id": self._active_run_id,
                 }
             run_id = _utc_now().strftime("%Y%m%dT%H%M%SZ") + "-" + os.urandom(4).hex()
+            self._mark_scheduler_trigger(run_id=run_id, requested_by=requested_by)
             self._active_run_id = run_id
             self._current_task = asyncio.create_task(
                 self._run_cycle(run_id=run_id, requested_by=requested_by, auto_promote=auto_promote)
@@ -672,10 +826,12 @@ class PredictiveTrainerManager:
             "config": {
                 "algo_repo_dir": str(self.config.algo_repo_dir),
                 "train_interval_secs": self.config.train_interval_secs,
+                "scheduler_poll_secs": self.config.scheduler_poll_secs,
                 "scheduler_enabled": self.config.scheduler_enabled,
                 "auto_promote": self.config.auto_promote if auto_promote is None else bool(auto_promote),
                 "relaunch_enabled": self.config.relaunch_enabled,
                 "train_timeout_secs": self.config.train_timeout_secs,
+                "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
             },
             "paths": {
                 "run_dir": str(run_dir),
@@ -1087,8 +1243,11 @@ class PredictiveTrainerManager:
             "active_next_state_ledger_path": str(self.config.next_state_ledger_path),
             "shadow_index_path": str(self.config.shadow_index_path),
             "train_interval_secs": self.config.train_interval_secs,
+            "scheduler_poll_secs": self.config.scheduler_poll_secs,
             "train_timeout_secs": self.config.train_timeout_secs,
+            "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
             "pending_restart": self._pending_restart,
+            "scheduler_trigger": self._scheduler_trigger_payload(),
         }
 
     def status_payload(self) -> dict[str, Any]:
@@ -1100,6 +1259,7 @@ class PredictiveTrainerManager:
             "pending_restart": self._pending_restart,
             "active_model": self._active_artifacts(),
             "latest_run_context": self._latest_run_context_path(),
+            "scheduler_trigger": self._scheduler_trigger_payload(),
         }
 
     def history_payload(self, limit: int = 25) -> dict[str, Any]:
