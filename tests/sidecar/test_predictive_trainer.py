@@ -1,10 +1,37 @@
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from src.api.predictive_trainer import PredictiveTrainerConfig, PredictiveTrainerManager
+
+
+def _write_shadow_sqlite_count(sqlite_path: Path, count: int) -> None:
+    sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(sqlite_path))
+    conn.executescript(
+        """
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE IF NOT EXISTS predictive_candidate_firehose_shadow_outcomes_stats (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            entry_count INTEGER NOT NULL DEFAULT 0,
+            last_seq INTEGER NOT NULL DEFAULT 0,
+            last_write_at TEXT
+        );
+        """,
+    )
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO predictive_candidate_firehose_shadow_outcomes_stats
+            (singleton, entry_count, last_seq, last_write_at)
+        VALUES (1, ?, ?, '2026-04-07T00:00:00Z')
+        """,
+        (count, count),
+    )
+    conn.commit()
+    conn.close()
 
 
 def _make_config(tmp_path: Path) -> PredictiveTrainerConfig:
@@ -139,9 +166,8 @@ def test_scheduler_trigger_prefers_row_threshold(tmp_path: Path):
             "last_trigger_shadow_entry_count": 40,
         }
     )
-    manager.config.shadow_index_path.write_text(
-        json.dumps([{"row": idx} for idx in range(150)]), encoding="utf-8"
-    )
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 150)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
 
     trigger = manager._scheduler_trigger_payload()
 
@@ -162,9 +188,8 @@ def test_scheduler_trigger_uses_interval_when_row_threshold_not_met(tmp_path: Pa
             "last_trigger_shadow_entry_count": 50,
         }
     )
-    manager.config.shadow_index_path.write_text(
-        json.dumps([{"row": idx} for idx in range(80)]), encoding="utf-8"
-    )
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 80)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
 
     trigger = manager._scheduler_trigger_payload()
 
@@ -176,9 +201,8 @@ def test_scheduler_trigger_uses_interval_when_row_threshold_not_met(tmp_path: Pa
 
 def test_scheduler_trigger_recovers_from_terminal_manifest_stale_task(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
-    manager.config.shadow_index_path.write_text(
-        json.dumps([{"row": idx} for idx in range(220)]), encoding="utf-8"
-    )
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 220)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
     run_id = "run-stale-terminal"
     manager._active_run_id = run_id
     manager._write_manifest(
@@ -253,9 +277,8 @@ def test_health_payload_reports_model_freshness_state(tmp_path: Path):
     )
     manager.config.model_path.write_text("{}", encoding="utf-8")
     manager.config.calibration_path.write_text(json.dumps({"rows": 10}), encoding="utf-8")
-    manager.config.shadow_index_path.write_text(
-        json.dumps([{"row": idx} for idx in range(260)]), encoding="utf-8"
-    )
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 260)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
     manager._write_scheduler_state(
         {
             "last_run_id": "run-old",
@@ -273,6 +296,19 @@ def test_health_payload_reports_model_freshness_state(tmp_path: Path):
     assert payload["current_shadow_entry_count"] == 260
     assert payload["new_shadow_rows_since_trigger"] == 40
     assert payload["model_freshness_state"] == "pending_retrain"
+
+
+def test_health_payload_uses_cached_sqlite_stats_not_json_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 333)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+    monkeypatch.setattr("src.api.predictive_trainer._count_json_array_entries", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("json hot path used")))
+
+    payload = manager.health_payload()
+
+    assert payload["current_shadow_entry_count"] == 333
+    assert payload["scheduler_trigger"]["shadow_index_count_cached"] is True
+    assert payload["scheduler_trigger"]["shadow_index_count_error"] is None
 
 
 @pytest.mark.asyncio

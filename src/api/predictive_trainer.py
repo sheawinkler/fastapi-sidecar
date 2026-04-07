@@ -5,6 +5,7 @@ import contextlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +14,12 @@ from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Any
+
+
+PREDICTIVE_CANDIDATE_FIREHOSE_TABLE = "predictive_candidate_firehose_shadow_outcomes"
+PREDICTIVE_CANDIDATE_FIREHOSE_STATS_TABLE = (
+    "predictive_candidate_firehose_shadow_outcomes_stats"
+)
 
 
 def _utc_now() -> datetime:
@@ -102,6 +109,68 @@ def _count_json_array_entries(path: Path) -> int:
     return 0
 
 
+def _default_shadow_index_stats_cache() -> dict[str, Any]:
+    return {
+        "current_shadow_entry_count": 0,
+        "shadow_index_size_bytes": 0,
+        "shadow_index_mtime_ns": 0,
+        "shadow_index_count_refreshed_at": None,
+        "shadow_index_count_error": None,
+        "shadow_index_count_cached": True,
+        "shadow_index_source": "sqlite_stats",
+        "shadow_index_last_seq": 0,
+        "shadow_index_last_write_at": None,
+    }
+
+
+def _read_shadow_sqlite_stats(path: Path) -> dict[str, Any]:
+    payload = _default_shadow_index_stats_cache()
+    if not path.exists():
+        payload["shadow_index_count_error"] = "sqlite_missing"
+        return payload
+    try:
+        stat_result = path.stat()
+        payload["shadow_index_size_bytes"] = int(stat_result.st_size)
+        payload["shadow_index_mtime_ns"] = int(getattr(stat_result, "st_mtime_ns", 0))
+    except Exception:
+        pass
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.executescript(
+            f"""
+            CREATE TABLE IF NOT EXISTS {PREDICTIVE_CANDIDATE_FIREHOSE_STATS_TABLE} (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                entry_count INTEGER NOT NULL DEFAULT 0,
+                last_seq INTEGER NOT NULL DEFAULT 0,
+                last_write_at TEXT
+            );
+            INSERT OR IGNORE INTO {PREDICTIVE_CANDIDATE_FIREHOSE_STATS_TABLE}
+                (singleton, entry_count, last_seq, last_write_at)
+            VALUES (1, 0, 0, NULL);
+            """
+        )
+        row = conn.execute(
+            f"""
+            SELECT entry_count, last_seq, last_write_at
+            FROM {PREDICTIVE_CANDIDATE_FIREHOSE_STATS_TABLE}
+            WHERE singleton = 1
+            """
+        ).fetchone()
+        if row:
+            payload["current_shadow_entry_count"] = _safe_int(row[0], 0)
+            payload["shadow_index_last_seq"] = _safe_int(row[1], 0)
+            payload["shadow_index_last_write_at"] = row[2]
+        payload["shadow_index_count_refreshed_at"] = _utc_iso()
+        payload["shadow_index_count_error"] = None
+        return payload
+    except Exception as exc:
+        payload["shadow_index_count_error"] = str(exc)
+        payload["shadow_index_count_refreshed_at"] = _utc_iso()
+        return payload
+    finally:
+        conn.close()
+
+
 def _path_text(path: Path, relative_to: Path | None = None) -> str:
     if relative_to is not None:
         try:
@@ -187,6 +256,14 @@ class PredictiveTrainerConfig:
     @property
     def shadow_index_path(self) -> Path:
         return self.algo_repo_dir / "logs/index/predictive_candidate_firehose_shadow_outcomes.json"
+
+    @property
+    def shadow_sqlite_path(self) -> Path:
+        return self.algo_repo_dir / "logs/index/predictive_candidate_firehose_shadow_outcomes.sqlite3"
+
+    @property
+    def shadow_duckdb_path(self) -> Path:
+        return self.algo_repo_dir / "logs/index/predictive_candidate_firehose_shadow_outcomes.duckdb"
 
     @property
     def run_context_dir(self) -> Path:
@@ -306,12 +383,69 @@ class PredictiveTrainerManager:
         self._scheduler_task: asyncio.Task | None = None
         self._pending_restart: dict[str, Any] | None = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sidecar-trainer")
+        self._shadow_index_stats_cache = self._bootstrap_shadow_index_stats_cache()
+
+    def _bootstrap_shadow_index_stats_cache(self) -> dict[str, Any]:
+        state_path = self.config.scheduler_state_path
+        if state_path.exists():
+            try:
+                payload = _read_json(state_path)
+            except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                cached = {
+                    **_default_shadow_index_stats_cache(),
+                    "current_shadow_entry_count": _safe_int(
+                        payload.get("current_shadow_entry_count"), 0
+                    ),
+                    "shadow_index_size_bytes": _safe_int(
+                        payload.get("shadow_index_size_bytes"), 0
+                    ),
+                    "shadow_index_mtime_ns": _safe_int(
+                        payload.get("shadow_index_mtime_ns"), 0
+                    ),
+                    "shadow_index_count_refreshed_at": payload.get(
+                        "shadow_index_count_refreshed_at"
+                    ),
+                    "shadow_index_count_error": payload.get("shadow_index_count_error"),
+                    "shadow_index_count_cached": bool(
+                        payload.get("shadow_index_count_cached", True)
+                    ),
+                    "shadow_index_source": payload.get("shadow_index_source")
+                    or "sqlite_stats",
+                    "shadow_index_last_seq": _safe_int(
+                        payload.get("shadow_index_last_seq"), 0
+                    ),
+                    "shadow_index_last_write_at": payload.get(
+                        "shadow_index_last_write_at"
+                    ),
+                }
+                if cached["shadow_index_count_refreshed_at"] is not None or cached[
+                    "current_shadow_entry_count"
+                ] > 0:
+                    return cached
+        return _read_shadow_sqlite_stats(self.config.shadow_sqlite_path)
+
+    def _persist_shadow_index_stats_cache(self) -> None:
+        state = self._read_scheduler_state()
+        state.update(self._shadow_index_stats_cache)
+        _write_json(self.config.scheduler_state_path, state)
+
+    def _refresh_shadow_index_stats_cache_sync(self) -> dict[str, Any]:
+        stats = _read_shadow_sqlite_stats(self.config.shadow_sqlite_path)
+        self._shadow_index_stats_cache = stats
+        self._persist_shadow_index_stats_cache()
+        return dict(stats)
+
+    async def _refresh_shadow_index_stats_cache(self) -> dict[str, Any]:
+        return await self._run_sync_on_executor(self._refresh_shadow_index_stats_cache_sync)
 
     async def start(self) -> None:
         if not self.config.scheduler_enabled:
             return
         if self._scheduler_task and not self._scheduler_task.done():
             return
+        await self._refresh_shadow_index_stats_cache()
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
 
     async def shutdown(self) -> None:
@@ -330,6 +464,7 @@ class PredictiveTrainerManager:
     async def _scheduler_loop(self) -> None:
         while True:
             try:
+                await self._refresh_shadow_index_stats_cache()
                 trigger = self._scheduler_trigger_payload()
                 if trigger.get("should_start"):
                     await self.start_run(
@@ -479,7 +614,8 @@ class PredictiveTrainerManager:
         return None
 
     def _default_scheduler_state(self) -> dict[str, Any]:
-        current_shadow_entries = _count_json_array_entries(self.config.shadow_index_path)
+        shadow_stats = _read_shadow_sqlite_stats(self.config.shadow_sqlite_path)
+        current_shadow_entries = _safe_int(shadow_stats.get("current_shadow_entry_count"), 0)
         latest_manifest = self._latest_manifest_summary()
         if latest_manifest:
             return {
@@ -490,6 +626,7 @@ class PredictiveTrainerManager:
                 "last_trigger_shadow_entry_count": _safe_int(
                     latest_manifest.get("raw_shadow_entry_count"), current_shadow_entries
                 ),
+                **shadow_stats,
             }
         return {
             "last_run_id": None,
@@ -497,6 +634,7 @@ class PredictiveTrainerManager:
             "last_run_started_at": _utc_iso(),
             "last_trigger_reason": "bootstrap_current_shadow_index",
             "last_trigger_shadow_entry_count": current_shadow_entries,
+            **shadow_stats,
         }
 
     def _read_scheduler_state(self) -> dict[str, Any]:
@@ -520,7 +658,9 @@ class PredictiveTrainerManager:
     def _scheduler_trigger_payload(self) -> dict[str, Any]:
         reconciliation = self._reconcile_run_state()
         state = self._read_scheduler_state()
-        current_shadow_entry_count = _count_json_array_entries(self.config.shadow_index_path)
+        current_shadow_entry_count = _safe_int(
+            self._shadow_index_stats_cache.get("current_shadow_entry_count"), 0
+        )
         last_trigger_shadow_entry_count = _safe_int(
             state.get("last_trigger_shadow_entry_count"), current_shadow_entry_count
         )
@@ -570,6 +710,27 @@ class PredictiveTrainerManager:
             "last_run_id": state.get("last_run_id"),
             "last_requested_by": state.get("last_requested_by"),
             "last_trigger_reason": state.get("last_trigger_reason"),
+            "shadow_index_count_cached": bool(
+                self._shadow_index_stats_cache.get("shadow_index_count_cached", True)
+            ),
+            "shadow_index_count_refreshed_at": self._shadow_index_stats_cache.get(
+                "shadow_index_count_refreshed_at"
+            ),
+            "shadow_index_count_error": self._shadow_index_stats_cache.get(
+                "shadow_index_count_error"
+            ),
+            "shadow_index_size_bytes": _safe_int(
+                self._shadow_index_stats_cache.get("shadow_index_size_bytes"), 0
+            ),
+            "shadow_index_mtime_ns": _safe_int(
+                self._shadow_index_stats_cache.get("shadow_index_mtime_ns"), 0
+            ),
+            "shadow_index_last_seq": _safe_int(
+                self._shadow_index_stats_cache.get("shadow_index_last_seq"), 0
+            ),
+            "shadow_index_last_write_at": self._shadow_index_stats_cache.get(
+                "shadow_index_last_write_at"
+            ),
         }
 
     def _mark_scheduler_trigger(self, *, run_id: str, requested_by: str) -> None:
@@ -850,6 +1011,7 @@ class PredictiveTrainerManager:
         requested_by: str,
         auto_promote: bool | None,
     ) -> dict[str, Any]:
+        await self._refresh_shadow_index_stats_cache()
         async with self._lock:
             self._reconcile_run_state()
             if self.is_running():
@@ -880,6 +1042,7 @@ class PredictiveTrainerManager:
             self._current_task = None
 
     def _run_cycle_sync(self, *, run_id: str, requested_by: str, auto_promote: bool | None) -> None:
+        self._refresh_shadow_index_stats_cache_sync()
         run_dir = self._run_dir(run_id)
         logs_dir = run_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
@@ -919,7 +1082,9 @@ class PredictiveTrainerManager:
                 "state": "not_attempted",
                 "auto_promote_requested": self.config.auto_promote if auto_promote is None else bool(auto_promote),
             },
-            "raw_shadow_entry_count": _count_json_array_entries(self.config.shadow_index_path),
+            "raw_shadow_entry_count": _safe_int(
+                self._shadow_index_stats_cache.get("current_shadow_entry_count"), 0
+            ),
             "active_model": self._active_artifacts(),
         }
         self._write_manifest(run_id, manifest)
@@ -1003,7 +1168,7 @@ class PredictiveTrainerManager:
                 "--output",
                 str(model_candidate),
                 "--shadow-index",
-                str(self.config.shadow_index_path),
+                str(self.config.shadow_sqlite_path),
             ]
             completed = subprocess.run(
                 train_cmd,
@@ -1345,7 +1510,9 @@ class PredictiveTrainerManager:
             "active_training_path": str(self.config.training_path),
             "active_calibration_path": str(self.config.calibration_path),
             "active_next_state_ledger_path": str(self.config.next_state_ledger_path),
-            "shadow_index_path": str(self.config.shadow_index_path),
+            "shadow_index_path": str(self.config.shadow_sqlite_path),
+            "shadow_index_legacy_path": str(self.config.shadow_index_path),
+            "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
             "train_interval_secs": self.config.train_interval_secs,
             "scheduler_poll_secs": self.config.scheduler_poll_secs,
             "train_timeout_secs": self.config.train_timeout_secs,

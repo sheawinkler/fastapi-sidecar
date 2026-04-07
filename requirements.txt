@@ -29,6 +29,7 @@ redis>=5.0.0
 influxdb-client>=1.38.0
 sqlalchemy[asyncio]>=2.0.0
 alembic>=1.12.0
+duckdb>=1.1.0
 
 # Technical Analysis
 ta-lib>=0.4.25
