@@ -174,6 +174,107 @@ def test_scheduler_trigger_uses_interval_when_row_threshold_not_met(tmp_path: Pa
     assert trigger["row_threshold_reached"] is False
 
 
+def test_scheduler_trigger_recovers_from_terminal_manifest_stale_task(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager.config.shadow_index_path.write_text(
+        json.dumps([{"row": idx} for idx in range(220)]), encoding="utf-8"
+    )
+    run_id = "run-stale-terminal"
+    manager._active_run_id = run_id
+    manager._write_manifest(
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "completed",
+            "raw_shadow_entry_count": 100,
+        },
+    )
+
+    class _NeverDoneTask:
+        def done(self) -> bool:
+            return False
+
+    manager._current_task = _NeverDoneTask()
+    manager._write_scheduler_state(
+        {
+            "last_run_id": run_id,
+            "last_requested_by": "scheduler_interval",
+            "last_run_started_at": "2026-04-07T00:00:00Z",
+            "last_trigger_reason": "scheduler_interval",
+            "last_trigger_shadow_entry_count": 100,
+        }
+    )
+
+    trigger = manager._scheduler_trigger_payload()
+
+    assert manager._current_task is None
+    assert manager._active_run_id is None
+    assert trigger["should_start"] is True
+    assert trigger["requested_by"] == "scheduler_row_threshold"
+    assert trigger["stale_running_state"] is True
+    assert trigger["stale_reason"] == "terminal_manifest_without_lock"
+
+
+def test_reconcile_marks_running_manifest_without_lock_failed(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    run_id = "run-manifest-only"
+    manager._write_manifest(
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "running",
+            "started_at": "2026-04-07T00:00:00Z",
+        },
+    )
+
+    reconciliation = manager._reconcile_run_state()
+    manifest = manager._read_manifest(run_id)
+
+    assert reconciliation["stale_running_state"] is True
+    assert reconciliation["stale_reason"] == "running_manifest_without_lock"
+    assert manifest["status"] == "failed"
+    assert manifest["error"]["type"] == "StaleRunState"
+
+
+def test_health_payload_reports_model_freshness_state(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager.config.training_path.write_text(
+        json.dumps(
+            {
+                "training": {"rows": 200, "shadow_rows": 200, "executed_rows": 1},
+                "validation": {
+                    "positive_rows": 120,
+                    "negative_rows": 80,
+                    "trained_at": "2026-04-07T03:38:24.484862Z",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager.config.model_path.write_text("{}", encoding="utf-8")
+    manager.config.calibration_path.write_text(json.dumps({"rows": 10}), encoding="utf-8")
+    manager.config.shadow_index_path.write_text(
+        json.dumps([{"row": idx} for idx in range(260)]), encoding="utf-8"
+    )
+    manager._write_scheduler_state(
+        {
+            "last_run_id": "run-old",
+            "last_requested_by": "scheduler_interval",
+            "last_run_started_at": "2026-04-07T00:00:00Z",
+            "last_trigger_reason": "scheduler_interval",
+            "last_trigger_shadow_entry_count": 220,
+        }
+    )
+
+    payload = manager.health_payload()
+
+    assert payload["active_model_trained_at"] == "2026-04-07T03:38:24.484862Z"
+    assert payload["active_model_shadow_rows"] == 200
+    assert payload["current_shadow_entry_count"] == 260
+    assert payload["new_shadow_rows_since_trigger"] == 40
+    assert payload["model_freshness_state"] == "pending_retrain"
+
+
 @pytest.mark.asyncio
 async def test_run_cycle_offloads_sync_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
@@ -347,16 +448,18 @@ def test_promote_candidate_relaunch_uses_wrapper_replace_env(tmp_path: Path, mon
 
     captured: dict[str, object] = {}
 
-    class _Completed:
-        stdout = "ok"
-        stderr = ""
+    class _Process:
+        pid = 4242
 
-    def _fake_run(cmd, **kwargs):
+    def _fake_popen(cmd, **kwargs):
         captured["cmd"] = cmd
         captured["env"] = kwargs.get("env")
-        return _Completed()
+        captured["stdout"] = kwargs.get("stdout")
+        captured["stderr"] = kwargs.get("stderr")
+        captured["start_new_session"] = kwargs.get("start_new_session")
+        return _Process()
 
-    monkeypatch.setattr("src.api.predictive_trainer.subprocess.run", _fake_run)
+    monkeypatch.setattr("src.api.predictive_trainer.subprocess.Popen", _fake_popen)
 
     result = manager._promote_candidate(
         run_id=run_id,
@@ -367,10 +470,13 @@ def test_promote_candidate_relaunch_uses_wrapper_replace_env(tmp_path: Path, mon
         forced=False,
     )
 
-    assert result["state"] == "promoted_and_relaunched"
+    assert result["state"] == "promoted_and_relaunch_requested"
+    assert result["restart_pid"] == 4242
+    assert result["restart_dispatch"] == "detached_wrapper"
     assert captured["cmd"] == [str(manager.config.deploy_script_path), "--live", "--skip-build"]
     assert captured["env"]["DEPLOY_WRAPPER_REPLACE_EXISTING"] == "1"
     assert captured["env"]["ALGOTRADER_WALLET"] == str(manager.config.wallet_path)
     assert captured["env"]["SIDECAR_REQUIRE_HEALTH"] == "0"
     assert captured["env"]["SIDECAR_SKIP_POST_LAUNCH_TRAINER_TRIGGER"] == "1"
     assert "REAL_ALGOTRADER_WALLET" not in captured["env"]
+    assert captured["start_new_session"] is True
