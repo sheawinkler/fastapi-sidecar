@@ -906,15 +906,31 @@ class PredictiveTrainerManager:
     def _scheduler_trigger_payload(self) -> dict[str, Any]:
         reconciliation = self._reconcile_run_state()
         state = self._read_scheduler_state()
+        active_model = self._active_artifacts()
         current_shadow_entry_count = _safe_int(
             self._shadow_index_stats_cache.get("current_shadow_entry_count"), 0
+        )
+        active_model_raw_shadow_entry_count = _safe_int(
+            active_model.get("raw_shadow_entry_count"), 0
         )
         last_trigger_shadow_entry_count = _safe_int(
             state.get("last_trigger_shadow_entry_count"), current_shadow_entry_count
         )
+        effective_trigger_shadow_entry_count = max(
+            last_trigger_shadow_entry_count, active_model_raw_shadow_entry_count
+        )
         new_shadow_rows_since_trigger = max(
             0, current_shadow_entry_count - last_trigger_shadow_entry_count
         )
+        new_shadow_rows_since_effective_baseline = max(
+            0, current_shadow_entry_count - effective_trigger_shadow_entry_count
+        )
+        shadow_row_lag_vs_active_model = max(
+            0, current_shadow_entry_count - active_model_raw_shadow_entry_count
+        )
+        corpus_advanced_beyond_active_model = (
+            active_model_raw_shadow_entry_count <= 0 and current_shadow_entry_count > 0
+        ) or shadow_row_lag_vs_active_model > 0
         last_run_started_at = str(state.get("last_run_started_at") or "").strip() or None
         last_started_dt = _parse_utc_ts(last_run_started_at)
         seconds_since_last_run_started: float | None = None
@@ -927,13 +943,15 @@ class PredictiveTrainerManager:
             or seconds_since_last_run_started >= self.config.train_interval_secs
         )
         row_threshold_reached = (
-            new_shadow_rows_since_trigger >= self.config.min_new_shadow_rows_to_trigger
+            new_shadow_rows_since_effective_baseline >= self.config.min_new_shadow_rows_to_trigger
         )
         requested_by: str | None = None
         reason = "waiting"
         should_start = False
         if self.is_running():
             reason = "already_running"
+        elif not corpus_advanced_beyond_active_model:
+            reason = "current_corpus_already_modeled"
         elif row_threshold_reached:
             reason = "row_threshold"
             requested_by = "scheduler_row_threshold"
@@ -949,8 +967,13 @@ class PredictiveTrainerManager:
             "stale_running_state": reconciliation["stale_running_state"],
             "stale_reason": reconciliation["stale_reason"],
             "current_shadow_entry_count": current_shadow_entry_count,
+            "active_model_raw_shadow_entry_count": active_model_raw_shadow_entry_count,
             "last_trigger_shadow_entry_count": last_trigger_shadow_entry_count,
+            "effective_trigger_shadow_entry_count": effective_trigger_shadow_entry_count,
             "new_shadow_rows_since_trigger": new_shadow_rows_since_trigger,
+            "new_shadow_rows_since_effective_baseline": new_shadow_rows_since_effective_baseline,
+            "shadow_row_lag_vs_active_model": shadow_row_lag_vs_active_model,
+            "corpus_advanced_beyond_active_model": corpus_advanced_beyond_active_model,
             "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
             "interval_elapsed": interval_elapsed,
             "row_threshold_reached": row_threshold_reached,

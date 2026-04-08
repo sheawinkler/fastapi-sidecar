@@ -38,6 +38,26 @@ def _write_shadow_sqlite_count(sqlite_path: Path, count: int) -> None:
     conn.close()
 
 
+def _write_active_training_artifact(config: PredictiveTrainerConfig, *, raw_shadow_entry_count: int, shadow_rows: int | None = None, rows: int | None = None) -> None:
+    config.training_path.write_text(
+        json.dumps(
+            {
+                "training": {
+                    "rows": rows if rows is not None else raw_shadow_entry_count,
+                    "shadow_rows": shadow_rows if shadow_rows is not None else raw_shadow_entry_count,
+                    "raw_shadow_entry_count": raw_shadow_entry_count,
+                },
+                "validation": {
+                    "positive_rows": 10,
+                    "negative_rows": 5,
+                    "trained_at": "2026-04-08T00:00:00Z",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _make_config(tmp_path: Path) -> PredictiveTrainerConfig:
     algo_repo = tmp_path / "algo"
     (algo_repo / "logs/analysis/predictive_entry").mkdir(parents=True, exist_ok=True)
@@ -187,6 +207,58 @@ def test_python_cmd_forces_unbuffered_python(tmp_path: Path):
     cmd = manager._python_cmd(Path("/tmp/example.py"), "--flag", "value")
 
     assert cmd == ["python3", "-u", "/tmp/example.py", "--flag", "value"]
+
+
+def test_scheduler_trigger_skips_auto_retrain_when_active_model_matches_current_corpus(tmp_path: Path):
+    config = _make_config(tmp_path)
+    manager = PredictiveTrainerManager(config)
+    _write_active_training_artifact(config, raw_shadow_entry_count=200, shadow_rows=120, rows=125)
+    manager._write_scheduler_state(
+        {
+            "last_run_id": "run-old",
+            "last_requested_by": "scheduler_interval",
+            "last_run_started_at": "2026-04-07T00:00:00Z",
+            "last_trigger_reason": "scheduler_interval",
+            "last_trigger_shadow_entry_count": 150,
+        }
+    )
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 200)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+
+    trigger = manager._scheduler_trigger_payload()
+
+    assert trigger["should_start"] is False
+    assert trigger["reason"] == "current_corpus_already_modeled"
+    assert trigger["active_model_raw_shadow_entry_count"] == 200
+    assert trigger["effective_trigger_shadow_entry_count"] == 200
+    assert trigger["new_shadow_rows_since_effective_baseline"] == 0
+    assert trigger["corpus_advanced_beyond_active_model"] is False
+
+
+def test_scheduler_trigger_uses_interval_when_active_model_lags_current_corpus(tmp_path: Path):
+    config = _make_config(tmp_path)
+    manager = PredictiveTrainerManager(config)
+    _write_active_training_artifact(config, raw_shadow_entry_count=170, shadow_rows=110, rows=115)
+    manager._write_scheduler_state(
+        {
+            "last_run_id": "run-old",
+            "last_requested_by": "scheduler_interval",
+            "last_run_started_at": "2026-04-07T00:00:00Z",
+            "last_trigger_reason": "scheduler_interval",
+            "last_trigger_shadow_entry_count": 195,
+        }
+    )
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 200)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+
+    trigger = manager._scheduler_trigger_payload()
+
+    assert trigger["should_start"] is True
+    assert trigger["requested_by"] == "scheduler_interval"
+    assert trigger["reason"] == "interval"
+    assert trigger["row_threshold_reached"] is False
+    assert trigger["shadow_row_lag_vs_active_model"] == 30
+    assert trigger["corpus_advanced_beyond_active_model"] is True
 
 
 def test_scheduler_trigger_uses_interval_when_row_threshold_not_met(tmp_path: Path):
@@ -577,7 +649,8 @@ def test_run_cycle_sync_records_stage_progress_and_promotion_record(
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
         stdout_path.write_text("ok\n", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
-        script_name = Path(cmd[1]).name
+        script_arg = cmd[2] if len(cmd) > 2 and cmd[1] == "-u" else cmd[1]
+        script_name = Path(script_arg).name
         if script_name == "build_mc_dataset.py":
             dataset_dir = stdout_path.parent.parent / "dataset"
             dataset_dir.mkdir(parents=True, exist_ok=True)
@@ -701,7 +774,8 @@ def test_run_cycle_sync_marks_failed_stage_on_train_error(
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
         stdout_path.write_text("ok\n", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
-        script_name = Path(cmd[1]).name
+        script_arg = cmd[2] if len(cmd) > 2 and cmd[1] == "-u" else cmd[1]
+        script_name = Path(script_arg).name
         if script_name == "build_mc_dataset.py":
             dataset_dir = stdout_path.parent.parent / "dataset"
             dataset_dir.mkdir(parents=True, exist_ok=True)
