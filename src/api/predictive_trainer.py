@@ -221,6 +221,8 @@ class PredictiveTrainerConfig:
     train_interval_secs: int
     scheduler_poll_secs: int
     scheduler_enabled: bool
+    scheduler_config_source: str
+    scheduler_disabled_reason: str | None
     auto_promote: bool
     relaunch_enabled: bool
     python_bin: str
@@ -333,6 +335,21 @@ class PredictiveTrainerConfig:
             data_dir = (Path.cwd() / data_dir).resolve()
         else:
             data_dir = data_dir.resolve()
+        scheduler_env_raw = os.getenv("SIDECAR_PREDICTIVE_TRAINER_ENABLED")
+        scheduler_enabled = _env_bool("SIDECAR_PREDICTIVE_TRAINER_ENABLED", True)
+        guidance_enabled = _env_bool("SIDECAR_GUIDANCE", True)
+        if scheduler_env_raw is None:
+            scheduler_config_source = "default_enabled"
+        else:
+            scheduler_config_source = "env_enabled" if scheduler_enabled else "env_disabled"
+        scheduler_disabled_reason = None
+        if not scheduler_enabled:
+            if guidance_enabled:
+                scheduler_disabled_reason = (
+                    "scheduler_explicitly_disabled_while_guidance_enabled"
+                )
+            else:
+                scheduler_disabled_reason = "scheduler_explicitly_disabled"
         return cls(
             algo_repo_dir=algo_repo_dir,
             data_dir=data_dir,
@@ -342,7 +359,9 @@ class PredictiveTrainerConfig:
             scheduler_poll_secs=max(
                 15, _safe_int(os.getenv("SIDECAR_PREDICTIVE_TRAINER_POLL_SECS"), 30)
             ),
-            scheduler_enabled=_env_bool("SIDECAR_PREDICTIVE_TRAINER_ENABLED", False),
+            scheduler_enabled=scheduler_enabled,
+            scheduler_config_source=scheduler_config_source,
+            scheduler_disabled_reason=scheduler_disabled_reason,
             auto_promote=_env_bool("SIDECAR_PREDICTIVE_TRAINER_AUTO_PROMOTE", True),
             relaunch_enabled=_env_bool("SIDECAR_PREDICTIVE_TRAINER_RELAUNCH_ENABLED", True),
             python_bin=str(
@@ -402,6 +421,14 @@ class PredictiveTrainerManager:
         self._pending_restart: dict[str, Any] | None = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sidecar-trainer")
         self._shadow_index_stats_cache = self._bootstrap_shadow_index_stats_cache()
+        if self.config.scheduler_disabled_reason:
+            print(
+                "WARNING: predictive trainer scheduler disabled "
+                f"(reason={self.config.scheduler_disabled_reason}, "
+                f"source={self.config.scheduler_config_source})",
+                file=sys.stderr,
+                flush=True,
+            )
 
     def _bootstrap_shadow_index_stats_cache(self) -> dict[str, Any]:
         state_path = self.config.scheduler_state_path
@@ -1855,12 +1882,19 @@ class PredictiveTrainerManager:
             "model_freshness_state": model_freshness_state,
         }
 
+    def _scheduler_contract_payload(self) -> dict[str, Any]:
+        return {
+            "scheduler_enabled": self.config.scheduler_enabled,
+            "scheduler_config_source": self.config.scheduler_config_source,
+            "scheduler_disabled_reason": self.config.scheduler_disabled_reason,
+        }
+
     def health_payload(self) -> dict[str, Any]:
         self._reconcile_run_state()
         freshness = self._freshness_payload()
         return {
             "status": "ok",
-            "scheduler_enabled": self.config.scheduler_enabled,
+            **self._scheduler_contract_payload(),
             "auto_promote": self.config.auto_promote,
             "relaunch_enabled": self.config.relaunch_enabled,
             "is_running": self.is_running(),
@@ -1889,6 +1923,7 @@ class PredictiveTrainerManager:
         freshness = self._freshness_payload()
         return {
             "status": "running" if self.is_running() else "idle",
+            **self._scheduler_contract_payload(),
             "active_run_id": self._active_run_id,
             "active_run": active_run,
             "active_run_stage": (active_run or {}).get("stage"),

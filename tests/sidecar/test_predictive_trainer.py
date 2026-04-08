@@ -70,6 +70,8 @@ def _make_config(tmp_path: Path) -> PredictiveTrainerConfig:
         train_interval_secs=600,
         scheduler_poll_secs=30,
         scheduler_enabled=False,
+        scheduler_config_source="test_disabled",
+        scheduler_disabled_reason="test_fixture_disabled",
         auto_promote=True,
         relaunch_enabled=True,
         python_bin="python3",
@@ -94,10 +96,45 @@ def test_from_env_accepts_numeric_truthy_flags(tmp_path: Path, monkeypatch: pyte
     config = PredictiveTrainerConfig.from_env(tmp_path / "data")
 
     assert config.scheduler_enabled is True
+    assert config.scheduler_config_source == "env_enabled"
+    assert config.scheduler_disabled_reason is None
     assert config.auto_promote is True
     assert config.relaunch_enabled is True
     assert config.scheduler_poll_secs == 45
     assert config.min_new_shadow_rows_to_trigger == 125
+
+
+def test_from_env_defaults_scheduler_enabled_when_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    algo_repo = tmp_path / "algo"
+    algo_repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_ALGO_REPO_DIR", str(algo_repo))
+    monkeypatch.delenv("SIDECAR_PREDICTIVE_TRAINER_ENABLED", raising=False)
+    monkeypatch.delenv("SIDECAR_GUIDANCE", raising=False)
+
+    config = PredictiveTrainerConfig.from_env(tmp_path / "data")
+
+    assert config.scheduler_enabled is True
+    assert config.scheduler_config_source == "default_enabled"
+    assert config.scheduler_disabled_reason is None
+
+
+def test_from_env_reports_disabled_reason_when_guidance_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    algo_repo = tmp_path / "algo"
+    algo_repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_ALGO_REPO_DIR", str(algo_repo))
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_ENABLED", "0")
+    monkeypatch.setenv("SIDECAR_GUIDANCE", "1")
+
+    config = PredictiveTrainerConfig.from_env(tmp_path / "data")
+
+    assert config.scheduler_enabled is False
+    assert config.scheduler_config_source == "env_disabled"
+    assert (
+        config.scheduler_disabled_reason
+        == "scheduler_explicitly_disabled_while_guidance_enabled"
+    )
 
 
 def test_evaluate_candidate_accepts_improvement(tmp_path: Path):
@@ -466,6 +503,9 @@ def test_status_payload_reports_shadow_store_paths(tmp_path: Path):
 
     payload = manager.status_payload()
 
+    assert payload["scheduler_enabled"] is False
+    assert payload["scheduler_config_source"] == "test_disabled"
+    assert payload["scheduler_disabled_reason"] == "test_fixture_disabled"
     assert payload["shadow_index_path"] == str(manager.config.shadow_sqlite_path)
     assert payload["shadow_index_legacy_path"] == str(manager.config.shadow_index_path)
     assert payload["shadow_duckdb_path"] == str(manager.config.shadow_duckdb_path)
