@@ -181,6 +181,14 @@ def test_scheduler_trigger_prefers_row_threshold(tmp_path: Path):
     assert trigger["row_threshold_reached"] is True
 
 
+def test_python_cmd_forces_unbuffered_python(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+
+    cmd = manager._python_cmd(Path("/tmp/example.py"), "--flag", "value")
+
+    assert cmd == ["python3", "-u", "/tmp/example.py", "--flag", "value"]
+
+
 def test_scheduler_trigger_uses_interval_when_row_threshold_not_met(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     manager._write_scheduler_state(

@@ -813,6 +813,9 @@ class PredictiveTrainerManager:
         stderr_text = stderr_path.read_text(encoding="utf-8") if stderr_path.exists() else ""
         return completed.returncode, stdout_text, stderr_text
 
+    def _python_cmd(self, script_path: Path, *args: str) -> list[str]:
+        return [self.config.python_bin, "-u", str(script_path), *args]
+
     def _latest_run_context_started_at(self) -> str | None:
         files = sorted(
             self.config.run_context_dir.glob("*.json"),
@@ -1345,9 +1348,8 @@ class PredictiveTrainerManager:
             eval_stdout_path = logs_dir / "eval.stdout.log"
             eval_stderr_path = logs_dir / "eval.stderr.log"
 
-            dataset_cmd = [
-                self.config.python_bin,
-                str(self.config.build_dataset_script_path),
+            dataset_cmd = self._python_cmd(
+                self.config.build_dataset_script_path,
                 "--out-dir",
                 str(dataset_dir),
                 "--log",
@@ -1367,7 +1369,7 @@ class PredictiveTrainerManager:
                 "--max-unknown-sleeve-ratio",
                 "1.0",
                 "--allow-low-quality-dataset",
-            ]
+            )
             dataset_returncode, dataset_stdout, dataset_stderr = self._run_logged_subprocess(
                 cmd=dataset_cmd,
                 cwd=self.config.algo_repo_dir,
@@ -1406,16 +1408,15 @@ class PredictiveTrainerManager:
             )
             self._write_manifest(run_id, manifest)
 
-            train_cmd = [
-                self.config.python_bin,
-                str(self.config.train_script_path),
+            train_cmd = self._python_cmd(
+                self.config.train_script_path,
                 "--input",
                 str(dataset_path),
                 "--output",
                 str(model_candidate),
                 "--shadow-index",
                 str(self.config.shadow_sqlite_path),
-            ]
+            )
             train_returncode, train_stdout, train_stderr = self._run_logged_subprocess(
                 cmd=train_cmd,
                 cwd=self.config.algo_repo_dir,
@@ -1455,16 +1456,15 @@ class PredictiveTrainerManager:
                 dataset_summary_path=dataset_summary_path,
             )
             self._write_manifest(run_id, manifest)
-            calibration_cmd = [
-                self.config.python_bin,
-                str(self.config.calibration_script_path),
+            calibration_cmd = self._python_cmd(
+                self.config.calibration_script_path,
                 "--dataset",
                 str(dataset_path),
                 "--ledger",
                 str(ledger_candidate),
                 "--snapshot",
                 str(calibration_candidate),
-            ]
+            )
             calibration_returncode, calibration_stdout, calibration_stderr = self._run_logged_subprocess(
                 cmd=calibration_cmd,
                 cwd=self.config.algo_repo_dir,
@@ -1486,9 +1486,8 @@ class PredictiveTrainerManager:
                 dataset_summary_path=dataset_summary_path,
             )
             self._write_manifest(run_id, manifest)
-            eval_cmd = [
-                self.config.python_bin,
-                str(self.config.eval_pack_script_path),
+            eval_cmd = self._python_cmd(
+                self.config.eval_pack_script_path,
                 "--model-artifact",
                 str(model_candidate),
                 "--training-artifact",
@@ -1499,7 +1498,7 @@ class PredictiveTrainerManager:
                 str(eval_pack_json),
                 "--out-md",
                 str(eval_pack_md),
-            ]
+            )
             eval_returncode, eval_stdout, eval_stderr = self._run_logged_subprocess(
                 cmd=eval_cmd,
                 cwd=self.config.algo_repo_dir,
