@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -116,6 +117,74 @@ def test_signal_feed_uses_api_key_header(tmp_path: Path, monkeypatch: pytest.Mon
     assert observed["headers"].get("x-api-key") == "test-key-123"
     assert len(entries) == 1
     assert entries[0].symbol == "SOL"
+
+
+def test_signal_cache_disables_missing_default_feed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    monkeypatch.setenv("ENSEMBLE_STUB", "true")
+    monkeypatch.setenv("SIGNAL_CACHE_ENABLED", "true")
+    monkeypatch.setenv("CALIBRATOR_ROOT", str(tmp_path / "calibrator"))
+    monkeypatch.delenv("SIGNAL_FEED_URL", raising=False)
+
+    module = _fresh_import_fastapi_server(monkeypatch)
+
+    class _DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None):
+            request = httpx.Request("GET", url)
+            response = httpx.Response(404, request=request)
+            raise httpx.HTTPStatusError("not found", request=request, response=response)
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", _DummyAsyncClient)
+
+    with caplog.at_level("INFO"):
+        asyncio.run(module.signal_cache.refresh())
+
+    assert module.signal_cache._disabled_reason == "default_signal_feed_not_found"
+    assert "Signal cache disabled: default feed endpoint unavailable" in caplog.text
+
+
+def test_signal_cache_keeps_warning_for_explicit_feed_404(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    monkeypatch.setenv("ENSEMBLE_STUB", "true")
+    monkeypatch.setenv("SIGNAL_CACHE_ENABLED", "true")
+    monkeypatch.setenv("CALIBRATOR_ROOT", str(tmp_path / "calibrator"))
+    monkeypatch.setenv("SIGNAL_FEED_URL", "http://127.0.0.1:8075/custom-feed")
+
+    module = _fresh_import_fastapi_server(monkeypatch)
+
+    class _DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None):
+            request = httpx.Request("GET", url)
+            response = httpx.Response(404, request=request)
+            raise httpx.HTTPStatusError("not found", request=request, response=response)
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", _DummyAsyncClient)
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(module.signal_cache.refresh())
+
+    assert module.signal_cache._disabled_reason is None
+    assert "Signal feed refresh failed" in caplog.text
 
 
 def test_predict_vector_features_returns_score_and_schema(sidecar_server_module):

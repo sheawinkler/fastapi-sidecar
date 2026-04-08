@@ -435,9 +435,8 @@ _calibrator: Optional[CalibratorBundle]
 _calibrator, _calibrator_reason = load_latest_calibrator(_CALIBRATOR_ROOT)
 _trainer_manager = PredictiveTrainerManager(PredictiveTrainerConfig.from_env(_data_dir()))
 
-SIGNAL_FEED_URL = os.getenv(
-    "SIGNAL_FEED_URL", "http://127.0.0.1:8075/signals/latest?limit=200"
-)
+DEFAULT_SIGNAL_FEED_URL = "http://127.0.0.1:8075/signals/latest?limit=200"
+SIGNAL_FEED_URL = os.getenv("SIGNAL_FEED_URL", DEFAULT_SIGNAL_FEED_URL)
 SIGNAL_FEED_API_KEY = str(os.getenv("SIGNAL_FEED_API_KEY", "")).strip()
 SIGNAL_FEED_API_HEADER = str(os.getenv("SIGNAL_FEED_API_HEADER", "x-api-key")).strip()
 SIGNAL_REFRESH_SECONDS = int(os.getenv("SIGNAL_REFRESH_SECONDS", "20"))
@@ -474,15 +473,32 @@ class SignalCache:
         self._lock = asyncio.Lock()
         self._last_error: Optional[str] = None
         self._known_files: set[str] = set()
+        self._disabled_reason: Optional[str] = None
 
     async def run(self) -> None:
         while True:
             await self.refresh()
+            if self._disabled_reason is not None:
+                return
             await asyncio.sleep(SIGNAL_REFRESH_SECONDS)
 
     async def refresh(self) -> None:
+        if self._disabled_reason is not None:
+            return
         try:
             entries = await self._fetch_feed()
+        except httpx.HTTPStatusError as exc:  # pragma: no cover - network
+            if self._should_disable_default_feed(exc):
+                self._last_error = str(exc)
+                self._disabled_reason = "default_signal_feed_not_found"
+                logger.info(
+                    "Signal cache disabled: default feed endpoint unavailable at %s",
+                    SIGNAL_FEED_URL,
+                )
+                return
+            self._last_error = str(exc)
+            logger.warning("Signal feed refresh failed: %s", exc)
+            return
         except Exception as exc:  # pragma: no cover - network
             self._last_error = str(exc)
             logger.warning("Signal feed refresh failed: %s", exc)
@@ -503,6 +519,13 @@ class SignalCache:
                 self._by_address.pop(removed.address.lower(), None)
                 key = removed.file or f"{removed.symbol}:{removed.address}:{removed.created_at}"
                 self._known_files.discard(key)
+
+    def _should_disable_default_feed(self, exc: httpx.HTTPStatusError) -> bool:
+        return (
+            SIGNAL_FEED_URL == DEFAULT_SIGNAL_FEED_URL
+            and exc.response is not None
+            and exc.response.status_code == 404
+        )
 
     async def _fetch_feed(self) -> List[OverrideEntry]:
         headers: Optional[Dict[str, str]] = None
