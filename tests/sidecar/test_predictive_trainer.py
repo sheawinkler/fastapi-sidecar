@@ -1,6 +1,9 @@
 import asyncio
 import json
 import sqlite3
+import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -385,6 +388,295 @@ def test_status_payload_reports_shadow_store_paths(tmp_path: Path):
     assert payload["shadow_index_path"] == str(manager.config.shadow_sqlite_path)
     assert payload["shadow_index_legacy_path"] == str(manager.config.shadow_index_path)
     assert payload["shadow_duckdb_path"] == str(manager.config.shadow_duckdb_path)
+
+
+def test_status_payload_reports_active_run_stage_and_artifact_flags(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    run_id = "run-stage"
+    run_dir = manager._run_dir(run_id)
+    (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+    (run_dir / "model_candidate.json").write_text("{}", encoding="utf-8")
+    manager._active_run_id = run_id
+
+    class _NeverDoneTask:
+        def done(self) -> bool:
+            return False
+
+    manager._current_task = _NeverDoneTask()
+    manager._write_manifest(
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "running",
+            "stage": "train",
+            "stage_started_at": "2026-04-07T00:00:00Z",
+            "stage_updated_at": "2026-04-07T00:00:05Z",
+            "stage_message": "training candidate model",
+        },
+    )
+
+    payload = manager.status_payload()
+
+    assert payload["status"] == "running"
+    assert payload["active_run_stage"] == "train"
+    assert payload["active_run_stage_message"] == "training candidate model"
+    assert payload["active_run"]["model_candidate_exists"] is True
+    assert payload["active_run"]["training_candidate_exists"] is False
+    assert payload["active_run"]["eval_pack_exists"] is False
+    assert payload["active_run"]["log_paths"]["train_stdout"].endswith("train.stdout.log")
+
+
+def test_run_logged_subprocess_streams_output_before_completion(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    script_path = tmp_path / "writer.py"
+    script_path.write_text(
+        "\n".join(
+            [
+                "import sys",
+                "import time",
+                "print('stdout-start', flush=True)",
+                "print('stderr-start', file=sys.stderr, flush=True)",
+                "time.sleep(0.5)",
+                "print('stdout-end', flush=True)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stdout_path = tmp_path / "stream.stdout.log"
+    stderr_path = tmp_path / "stream.stderr.log"
+    result: dict[str, object] = {}
+
+    def _target() -> None:
+        result["value"] = manager._run_logged_subprocess(
+            cmd=[sys.executable, str(script_path)],
+            cwd=tmp_path,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            timeout=5,
+        )
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        if stdout_path.exists() and "stdout-start" in stdout_path.read_text(encoding="utf-8"):
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("stdout log did not update before subprocess completion")
+
+    thread.join(timeout=3.0)
+    assert thread.is_alive() is False
+    assert result["value"][0] == 0
+    assert "stdout-end" in stdout_path.read_text(encoding="utf-8")
+    assert "stderr-start" in stderr_path.read_text(encoding="utf-8")
+
+
+def test_run_cycle_sync_records_stage_progress_and_promotion_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager.config.training_path.write_text(
+        json.dumps(
+            {
+                "training": {"rows": 10, "shadow_rows": 10, "executed_rows": 1, "version": "old"},
+                "validation": {
+                    "positive_rows": 6,
+                    "negative_rows": 4,
+                    "trained_at": "2026-04-07T00:00:00Z",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager.config.model_path.write_text(
+        json.dumps(
+            {
+                "version": "old",
+                "calibration": {
+                    "global_mae_sol": 1.0,
+                    "tradeability_head_brier": {"p_positive_after_cost": 0.5},
+                },
+                "data_quality": {"row_count": 10, "positive_net_sol_count": 6, "negative_net_sol_count": 4},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager.config.calibration_path.write_text(json.dumps({"rows": 1}), encoding="utf-8")
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 220)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+
+    stage_writes: list[str] = []
+    original_write_manifest = manager._write_manifest
+
+    def _capture_manifest(run_id: str, payload: dict[str, object]) -> None:
+        stage = str(payload.get("stage") or "")
+        if stage:
+            stage_writes.append(stage)
+        original_write_manifest(run_id, payload)
+
+    monkeypatch.setattr(manager, "_write_manifest", _capture_manifest)
+
+    def _fake_logged_subprocess(*, cmd, cwd, stdout_path, stderr_path, timeout=None):
+        stdout_path.parent.mkdir(parents=True, exist_ok=True)
+        stdout_path.write_text("ok\n", encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+        script_name = Path(cmd[1]).name
+        if script_name == "build_mc_dataset.py":
+            dataset_dir = stdout_path.parent.parent / "dataset"
+            dataset_dir.mkdir(parents=True, exist_ok=True)
+            (dataset_dir / "dataset_latest.jsonl").write_text('{"row":1}\n', encoding="utf-8")
+            (dataset_dir / "dataset_latest_summary.json").write_text(
+                json.dumps(
+                    {
+                        "rows": 20,
+                        "ok": True,
+                        "quality_gates": {},
+                        "summary": str(dataset_dir / "dataset_latest_summary.json"),
+                        "unknown_sleeve_ratio": 0.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return 0, '{"ok": true}', ""
+        if script_name == "train_predictive_entry_model.py":
+            output_path = Path(cmd[cmd.index("--output") + 1])
+            output_path.write_text(
+                json.dumps(
+                    {
+                        "version": "predictive-entry-v12.2",
+                        "trained_at": "2026-04-07T00:10:00Z",
+                        "training_window": {"rows": 20, "executed_rows": 5, "shadow_rows": 15},
+                        "data_quality": {
+                            "row_count": 20,
+                            "positive_net_sol_count": 12,
+                            "negative_net_sol_count": 8,
+                        },
+                        "executed_data_quality": {"row_count": 5},
+                        "shadow_data_quality": {"row_count": 15},
+                        "calibration": {
+                            "global_mae_sol": 0.8,
+                            "tradeability_head_brier": {"p_positive_after_cost": 0.2},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return 0, '{"rows": 20}', ""
+        if script_name in {"update_predictive_next_state_ledger.py", "refresh_predictive_calibration.py"}:
+            Path(cmd[cmd.index("--snapshot") + 1]).write_text(json.dumps({"rows": 6}), encoding="utf-8")
+            Path(cmd[cmd.index("--ledger") + 1]).write_text('{"row":1}\n', encoding="utf-8")
+            return 0, '{"ok": true}', ""
+        if script_name == "report_model_eval_pack.py":
+            Path(cmd[cmd.index("--out-json") + 1]).write_text(
+                json.dumps(
+                    {
+                        "window": {"n": 20},
+                        "calibration_and_sample_sufficiency": {"ok": True},
+                        "decision_gaps": {"mean": 0.1},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            Path(cmd[cmd.index("--out-md") + 1]).write_text("# ok\n", encoding="utf-8")
+            return 0, '{"ok": true}', ""
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(manager, "_run_logged_subprocess", _fake_logged_subprocess)
+    monkeypatch.setattr(
+        manager,
+        "_promote_candidate",
+        lambda **_kwargs: {"state": "promoted_pending_restart", "forced": False},
+    )
+
+    manager._run_cycle_sync(run_id="run-progress", requested_by="manual", auto_promote=None)
+
+    manifest = manager._read_manifest("run-progress")
+    ordered_stages: list[str] = []
+    for stage in stage_writes:
+        if not ordered_stages or ordered_stages[-1] != stage:
+            ordered_stages.append(stage)
+
+    assert ordered_stages == [
+        "dataset",
+        "train",
+        "attest",
+        "calibrate",
+        "eval",
+        "gate",
+        "promote",
+        "completed",
+    ]
+    assert manifest["status"] == "completed"
+    assert manifest["stage"] == "completed"
+    assert manifest["promotion"]["state"] == "promoted_pending_restart"
+    assert (manager._run_dir("run-progress") / "promotion.json").exists()
+    status_manifest = manager._manifest_for_status("run-progress", manifest)
+    assert status_manifest["model_candidate_exists"] is True
+    assert status_manifest["training_candidate_exists"] is True
+    assert status_manifest["calibration_candidate_exists"] is True
+    assert status_manifest["eval_pack_exists"] is True
+    assert status_manifest["promotion_record_exists"] is True
+
+
+def test_run_cycle_sync_marks_failed_stage_on_train_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager.config.training_path.write_text(
+        json.dumps(
+            {
+                "training": {"rows": 10, "shadow_rows": 10, "executed_rows": 1, "version": "old"},
+                "validation": {
+                    "positive_rows": 6,
+                    "negative_rows": 4,
+                    "trained_at": "2026-04-07T00:00:00Z",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager.config.model_path.write_text("{}", encoding="utf-8")
+    manager.config.calibration_path.write_text(json.dumps({"rows": 1}), encoding="utf-8")
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 220)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+
+    def _fake_logged_subprocess(*, cmd, cwd, stdout_path, stderr_path, timeout=None):
+        stdout_path.parent.mkdir(parents=True, exist_ok=True)
+        stdout_path.write_text("ok\n", encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+        script_name = Path(cmd[1]).name
+        if script_name == "build_mc_dataset.py":
+            dataset_dir = stdout_path.parent.parent / "dataset"
+            dataset_dir.mkdir(parents=True, exist_ok=True)
+            (dataset_dir / "dataset_latest.jsonl").write_text('{"row":1}\n', encoding="utf-8")
+            (dataset_dir / "dataset_latest_summary.json").write_text(
+                json.dumps(
+                    {
+                        "rows": 20,
+                        "ok": True,
+                        "quality_gates": {},
+                        "summary": str(dataset_dir / "dataset_latest_summary.json"),
+                        "unknown_sleeve_ratio": 0.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return 0, '{"ok": true}', ""
+        if script_name == "train_predictive_entry_model.py":
+            return 7, "", "boom"
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(manager, "_run_logged_subprocess", _fake_logged_subprocess)
+
+    manager._run_cycle_sync(run_id="run-failed", requested_by="manual", auto_promote=None)
+
+    manifest = manager._read_manifest("run-failed")
+    assert manifest["status"] == "failed"
+    assert manifest["stage"] == "failed"
+    assert manifest["error"]["message"] == "train step failed (7): boom"
 
 
 @pytest.mark.asyncio

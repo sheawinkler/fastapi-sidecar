@@ -92,6 +92,13 @@ def _atomic_copy(src: Path, dest: Path) -> None:
     os.replace(tmp, dest)
 
 
+def _path_exists_text(path: Path) -> bool:
+    try:
+        return path.exists()
+    except Exception:
+        return False
+
+
 def _count_json_array_entries(path: Path) -> int:
     if not path.exists():
         return 0
@@ -462,7 +469,22 @@ class PredictiveTrainerManager:
                 and not self._terminal_manifest_status(active_manifest.get("status"))
             ):
                 active_manifest["status"] = "cancelled"
+                active_manifest["stage"] = "cancelled"
                 active_manifest["completed_at"] = _utc_iso()
+                active_manifest["stage_updated_at"] = active_manifest["completed_at"]
+                active_manifest["stage_message"] = (
+                    "sidecar shutdown cancelled in-progress trainer run"
+                )
+                active_manifest = self._update_manifest_stage(
+                    self._active_run_id,
+                    active_manifest,
+                    stage="cancelled",
+                    stage_message="sidecar shutdown cancelled in-progress trainer run",
+                    dataset_rows=active_manifest.get("dataset_rows"),
+                    dataset_summary_path=Path(active_manifest["dataset_summary_path"])
+                    if active_manifest.get("dataset_summary_path")
+                    else None,
+                )
                 active_manifest["error"] = {
                     "type": "TrainerShutdown",
                     "message": "sidecar shutdown cancelled in-progress trainer run",
@@ -551,6 +573,9 @@ class PredictiveTrainerManager:
             latest_run_id = str(latest_manifest.get("run_id") or "").strip()
             latest_manifest["status"] = "failed"
             latest_manifest["completed_at"] = _utc_iso()
+            latest_manifest["stage"] = "failed"
+            latest_manifest["stage_updated_at"] = latest_manifest["completed_at"]
+            latest_manifest["stage_message"] = "reconciled running manifest without live task or lock"
             latest_manifest["error"] = {
                 "type": "StaleRunState",
                 "message": "reconciled running manifest without live task or lock",
@@ -593,6 +618,107 @@ class PredictiveTrainerManager:
 
     def _write_manifest(self, run_id: str, payload: dict[str, Any]) -> None:
         _write_json(self._manifest_path(run_id), payload)
+
+    def _run_log_paths(self, run_id: str) -> dict[str, str]:
+        logs_dir = self._run_dir(run_id) / "logs"
+        return {
+            "dataset_stdout": str(logs_dir / "dataset.stdout.log"),
+            "dataset_stderr": str(logs_dir / "dataset.stderr.log"),
+            "train_stdout": str(logs_dir / "train.stdout.log"),
+            "train_stderr": str(logs_dir / "train.stderr.log"),
+            "calibration_stdout": str(logs_dir / "calibration.stdout.log"),
+            "calibration_stderr": str(logs_dir / "calibration.stderr.log"),
+            "eval_stdout": str(logs_dir / "eval.stdout.log"),
+            "eval_stderr": str(logs_dir / "eval.stderr.log"),
+            "restart_stdout": str(logs_dir / "restart.stdout.log"),
+            "restart_stderr": str(logs_dir / "restart.stderr.log"),
+        }
+
+    def _run_artifact_paths(self, run_id: str) -> dict[str, Path]:
+        run_dir = self._run_dir(run_id)
+        return {
+            "model_candidate": run_dir / "model_candidate.json",
+            "training_candidate": run_dir / "prelaunch_training_candidate.json",
+            "calibration_candidate": run_dir / "calibration_candidate.json",
+            "ledger_candidate": run_dir / "next_state_ledger_candidate.jsonl",
+            "eval_pack_json": run_dir / "model_eval_pack.json",
+            "eval_pack_md": run_dir / "model_eval_pack.md",
+            "promotion_record": run_dir / "promotion.json",
+        }
+
+    def _artifact_existence_flags(self, run_id: str) -> dict[str, bool]:
+        paths = self._run_artifact_paths(run_id)
+        return {
+            "model_candidate_exists": _path_exists_text(paths["model_candidate"]),
+            "training_candidate_exists": _path_exists_text(paths["training_candidate"]),
+            "calibration_candidate_exists": _path_exists_text(paths["calibration_candidate"]),
+            "eval_pack_exists": _path_exists_text(paths["eval_pack_json"]),
+            "promotion_record_exists": _path_exists_text(paths["promotion_record"]),
+        }
+
+    def _update_manifest_stage(
+        self,
+        run_id: str,
+        manifest: dict[str, Any],
+        *,
+        stage: str,
+        stage_message: str,
+        dataset_rows: int | None = None,
+        dataset_summary_path: Path | None = None,
+    ) -> dict[str, Any]:
+        now = _utc_iso()
+        if str(manifest.get("stage") or "").strip() != stage:
+            manifest["stage"] = stage
+            manifest["stage_started_at"] = now
+        else:
+            manifest.setdefault("stage_started_at", now)
+        manifest["stage_updated_at"] = now
+        manifest["stage_message"] = stage_message
+        if dataset_rows is not None:
+            manifest["dataset_rows"] = _safe_int(dataset_rows, 0)
+        if dataset_summary_path is not None:
+            manifest["dataset_summary_path"] = str(dataset_summary_path)
+        manifest["log_paths"] = self._run_log_paths(run_id)
+        manifest.update(self._artifact_existence_flags(run_id))
+        return manifest
+
+    def _manifest_for_status(self, run_id: str, manifest: dict[str, Any] | None) -> dict[str, Any] | None:
+        if manifest is None:
+            return None
+        payload = dict(manifest)
+        payload.setdefault("log_paths", self._run_log_paths(run_id))
+        payload.update(self._artifact_existence_flags(run_id))
+        return payload
+
+    def _run_logged_subprocess(
+        self,
+        *,
+        cmd: list[str],
+        cwd: Path,
+        stdout_path: Path,
+        stderr_path: Path,
+        timeout: int | None = None,
+    ) -> tuple[int, str, str]:
+        stdout_path.parent.mkdir(parents=True, exist_ok=True)
+        stderr_path.parent.mkdir(parents=True, exist_ok=True)
+        env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        with stdout_path.open("w", encoding="utf-8", buffering=1) as stdout_fh, stderr_path.open(
+            "w", encoding="utf-8", buffering=1
+        ) as stderr_fh:
+            completed = subprocess.run(
+                cmd,
+                cwd=cwd,
+                check=False,
+                stdout=stdout_fh,
+                stderr=stderr_fh,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+        stdout_text = stdout_path.read_text(encoding="utf-8") if stdout_path.exists() else ""
+        stderr_text = stderr_path.read_text(encoding="utf-8") if stderr_path.exists() else ""
+        return completed.returncode, stdout_text, stderr_text
 
     def _latest_run_context_started_at(self) -> str | None:
         files = sorted(
@@ -1073,6 +1199,7 @@ class PredictiveTrainerManager:
         run_dir = self._run_dir(run_id)
         logs_dir = run_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
+        artifact_paths = self._run_artifact_paths(run_id)
         lock_payload = {
             "run_id": run_id,
             "requested_by": requested_by,
@@ -1097,12 +1224,13 @@ class PredictiveTrainerManager:
             },
             "paths": {
                 "run_dir": str(run_dir),
-                "model_candidate": str(run_dir / "model_candidate.json"),
-                "training_candidate": str(run_dir / "prelaunch_training_candidate.json"),
-                "calibration_candidate": str(run_dir / "calibration_candidate.json"),
-                "ledger_candidate": str(run_dir / "next_state_ledger_candidate.jsonl"),
-                "eval_pack_json": str(run_dir / "model_eval_pack.json"),
-                "eval_pack_md": str(run_dir / "model_eval_pack.md"),
+                "model_candidate": str(artifact_paths["model_candidate"]),
+                "training_candidate": str(artifact_paths["training_candidate"]),
+                "calibration_candidate": str(artifact_paths["calibration_candidate"]),
+                "ledger_candidate": str(artifact_paths["ledger_candidate"]),
+                "eval_pack_json": str(artifact_paths["eval_pack_json"]),
+                "eval_pack_md": str(artifact_paths["eval_pack_md"]),
+                "promotion_record": str(artifact_paths["promotion_record"]),
             },
             "artifacts": {},
             "promotion": {
@@ -1114,20 +1242,35 @@ class PredictiveTrainerManager:
             ),
             "active_model": self._active_artifacts(),
         }
+        self._update_manifest_stage(
+            run_id,
+            manifest,
+            stage="dataset",
+            stage_message="building training dataset",
+        )
         self._write_manifest(run_id, manifest)
 
         try:
             dataset_summary = self._dataset_summary()
-            model_candidate = run_dir / "model_candidate.json"
-            training_candidate = run_dir / "prelaunch_training_candidate.json"
-            calibration_candidate = run_dir / "calibration_candidate.json"
-            ledger_candidate = run_dir / "next_state_ledger_candidate.jsonl"
-            eval_pack_json = run_dir / "model_eval_pack.json"
-            eval_pack_md = run_dir / "model_eval_pack.md"
+            model_candidate = artifact_paths["model_candidate"]
+            training_candidate = artifact_paths["training_candidate"]
+            calibration_candidate = artifact_paths["calibration_candidate"]
+            ledger_candidate = artifact_paths["ledger_candidate"]
+            eval_pack_json = artifact_paths["eval_pack_json"]
+            eval_pack_md = artifact_paths["eval_pack_md"]
+            promotion_record = artifact_paths["promotion_record"]
             dataset_dir = run_dir / "dataset"
             dataset_dir.mkdir(parents=True, exist_ok=True)
             dataset_path = dataset_dir / "dataset_latest.jsonl"
             dataset_summary_path = dataset_dir / "dataset_latest_summary.json"
+            dataset_stdout_path = logs_dir / "dataset.stdout.log"
+            dataset_stderr_path = logs_dir / "dataset.stderr.log"
+            train_stdout_path = logs_dir / "train.stdout.log"
+            train_stderr_path = logs_dir / "train.stderr.log"
+            calibration_stdout_path = logs_dir / "calibration.stdout.log"
+            calibration_stderr_path = logs_dir / "calibration.stderr.log"
+            eval_stdout_path = logs_dir / "eval.stdout.log"
+            eval_stderr_path = logs_dir / "eval.stderr.log"
 
             dataset_cmd = [
                 self.config.python_bin,
@@ -1152,24 +1295,17 @@ class PredictiveTrainerManager:
                 "1.0",
                 "--allow-low-quality-dataset",
             ]
-            dataset_completed = subprocess.run(
-                dataset_cmd,
+            dataset_returncode, dataset_stdout, dataset_stderr = self._run_logged_subprocess(
+                cmd=dataset_cmd,
                 cwd=self.config.algo_repo_dir,
-                check=False,
-                capture_output=True,
-                text=True,
+                stdout_path=dataset_stdout_path,
+                stderr_path=dataset_stderr_path,
                 timeout=self.config.train_timeout_secs,
             )
-            (logs_dir / "dataset.stdout.log").write_text(
-                dataset_completed.stdout, encoding="utf-8"
-            )
-            (logs_dir / "dataset.stderr.log").write_text(
-                dataset_completed.stderr, encoding="utf-8"
-            )
-            if dataset_completed.returncode != 0:
-                combined = f"{dataset_completed.stdout}\n{dataset_completed.stderr}"
+            if dataset_returncode != 0:
+                combined = f"{dataset_stdout}\n{dataset_stderr}"
                 quality_gate_failed = False
-                for blob in (dataset_completed.stdout, dataset_completed.stderr):
+                for blob in (dataset_stdout, dataset_stderr):
                     blob = (blob or "").strip()
                     if not blob:
                         continue
@@ -1182,10 +1318,20 @@ class PredictiveTrainerManager:
                         break
                 if not (quality_gate_failed and dataset_path.exists()):
                     raise RuntimeError(
-                        f"dataset build failed ({dataset_completed.returncode}): {combined.strip()}"
+                        f"dataset build failed ({dataset_returncode}): {combined.strip()}"
                     )
             if dataset_summary_path.exists():
                 dataset_summary = _read_json(dataset_summary_path)
+            manifest["dataset"] = dataset_summary
+            self._update_manifest_stage(
+                run_id,
+                manifest,
+                stage="train",
+                stage_message="training candidate model",
+                dataset_rows=_safe_int(dataset_summary.get("rows"), 0),
+                dataset_summary_path=dataset_summary_path,
+            )
+            self._write_manifest(run_id, manifest)
 
             train_cmd = [
                 self.config.python_bin,
@@ -1197,17 +1343,27 @@ class PredictiveTrainerManager:
                 "--shadow-index",
                 str(self.config.shadow_sqlite_path),
             ]
-            completed = subprocess.run(
-                train_cmd,
+            train_returncode, train_stdout, train_stderr = self._run_logged_subprocess(
+                cmd=train_cmd,
                 cwd=self.config.algo_repo_dir,
-                check=True,
-                capture_output=True,
-                text=True,
+                stdout_path=train_stdout_path,
+                stderr_path=train_stderr_path,
                 timeout=self.config.train_timeout_secs,
             )
-            (logs_dir / "train.stdout.log").write_text(completed.stdout, encoding="utf-8")
-            (logs_dir / "train.stderr.log").write_text(completed.stderr, encoding="utf-8")
+            if train_returncode != 0:
+                raise RuntimeError(
+                    f"train step failed ({train_returncode}): {(train_stdout + chr(10) + train_stderr).strip()}"
+                )
 
+            self._update_manifest_stage(
+                run_id,
+                manifest,
+                stage="attest",
+                stage_message="building candidate attestation",
+                dataset_rows=_safe_int(dataset_summary.get("rows"), 0),
+                dataset_summary_path=dataset_summary_path,
+            )
+            self._write_manifest(run_id, manifest)
             candidate_attestation = self._build_attestation(
                 model_candidate,
                 dataset_path,
@@ -1217,6 +1373,15 @@ class PredictiveTrainerManager:
             )
             _write_json(training_candidate, candidate_attestation)
 
+            self._update_manifest_stage(
+                run_id,
+                manifest,
+                stage="calibrate",
+                stage_message="building calibration snapshot",
+                dataset_rows=_safe_int(dataset_summary.get("rows"), 0),
+                dataset_summary_path=dataset_summary_path,
+            )
+            self._write_manifest(run_id, manifest)
             calibration_cmd = [
                 self.config.python_bin,
                 str(self.config.calibration_script_path),
@@ -1227,20 +1392,27 @@ class PredictiveTrainerManager:
                 "--snapshot",
                 str(calibration_candidate),
             ]
-            calibration_completed = subprocess.run(
-                calibration_cmd,
+            calibration_returncode, calibration_stdout, calibration_stderr = self._run_logged_subprocess(
+                cmd=calibration_cmd,
                 cwd=self.config.algo_repo_dir,
-                check=True,
-                capture_output=True,
-                text=True,
+                stdout_path=calibration_stdout_path,
+                stderr_path=calibration_stderr_path,
             )
-            (logs_dir / "calibration.stdout.log").write_text(
-                calibration_completed.stdout, encoding="utf-8"
-            )
-            (logs_dir / "calibration.stderr.log").write_text(
-                calibration_completed.stderr, encoding="utf-8"
-            )
+            if calibration_returncode != 0:
+                raise RuntimeError(
+                    "calibration step failed "
+                    f"({calibration_returncode}): {(calibration_stdout + chr(10) + calibration_stderr).strip()}"
+                )
 
+            self._update_manifest_stage(
+                run_id,
+                manifest,
+                stage="eval",
+                stage_message="building evaluation pack",
+                dataset_rows=_safe_int(dataset_summary.get("rows"), 0),
+                dataset_summary_path=dataset_summary_path,
+            )
+            self._write_manifest(run_id, manifest)
             eval_cmd = [
                 self.config.python_bin,
                 str(self.config.eval_pack_script_path),
@@ -1255,16 +1427,26 @@ class PredictiveTrainerManager:
                 "--out-md",
                 str(eval_pack_md),
             ]
-            eval_completed = subprocess.run(
-                eval_cmd,
+            eval_returncode, eval_stdout, eval_stderr = self._run_logged_subprocess(
+                cmd=eval_cmd,
                 cwd=self.config.algo_repo_dir,
-                check=True,
-                capture_output=True,
-                text=True,
+                stdout_path=eval_stdout_path,
+                stderr_path=eval_stderr_path,
             )
-            (logs_dir / "eval.stdout.log").write_text(eval_completed.stdout, encoding="utf-8")
-            (logs_dir / "eval.stderr.log").write_text(eval_completed.stderr, encoding="utf-8")
+            if eval_returncode != 0:
+                raise RuntimeError(
+                    f"eval step failed ({eval_returncode}): {(eval_stdout + chr(10) + eval_stderr).strip()}"
+                )
 
+            self._update_manifest_stage(
+                run_id,
+                manifest,
+                stage="gate",
+                stage_message="evaluating promotion gate",
+                dataset_rows=_safe_int(dataset_summary.get("rows"), 0),
+                dataset_summary_path=dataset_summary_path,
+            )
+            self._write_manifest(run_id, manifest)
             candidate_model = _read_json(model_candidate)
             gate_result = self._evaluate_candidate(
                 active=manifest["active_model"],
@@ -1273,8 +1455,6 @@ class PredictiveTrainerManager:
             )
             candidate_eval_pack = _read_json(eval_pack_json)
 
-            manifest["status"] = "completed"
-            manifest["completed_at"] = _utc_iso()
             manifest["dataset"] = dataset_summary
             manifest["artifacts"] = {
                 "candidate_model": str(model_candidate),
@@ -1320,6 +1500,15 @@ class PredictiveTrainerManager:
                 and gate_result.get("ok")
             )
             if should_promote:
+                self._update_manifest_stage(
+                    run_id,
+                    manifest,
+                    stage="promote",
+                    stage_message="promoting candidate artifacts",
+                    dataset_rows=_safe_int(dataset_summary.get("rows"), 0),
+                    dataset_summary_path=dataset_summary_path,
+                )
+                self._write_manifest(run_id, manifest)
                 promotion = self._promote_candidate(
                     run_id=run_id,
                     model_candidate=model_candidate,
@@ -1336,6 +1525,17 @@ class PredictiveTrainerManager:
                 manifest["promotion"]["state"] = (
                     "gated_off" if not gate_result.get("ok") else "auto_promote_disabled"
                 )
+            _write_json(promotion_record, manifest["promotion"])
+            self._update_manifest_stage(
+                run_id,
+                manifest,
+                stage="completed",
+                stage_message="trainer run completed",
+                dataset_rows=_safe_int(dataset_summary.get("rows"), 0),
+                dataset_summary_path=dataset_summary_path,
+            )
+            manifest["status"] = "completed"
+            manifest["completed_at"] = _utc_iso()
             self._write_manifest(run_id, manifest)
             self._append_history(
                 {
@@ -1351,6 +1551,16 @@ class PredictiveTrainerManager:
         except Exception as exc:
             manifest["status"] = "failed"
             manifest["completed_at"] = _utc_iso()
+            self._update_manifest_stage(
+                run_id,
+                manifest,
+                stage="failed",
+                stage_message=f"trainer run failed: {exc}",
+                dataset_rows=manifest.get("dataset_rows"),
+                dataset_summary_path=Path(manifest["dataset_summary_path"])
+                if manifest.get("dataset_summary_path")
+                else None,
+            )
             manifest["error"] = {
                 "type": exc.__class__.__name__,
                 "message": str(exc),
@@ -1579,11 +1789,16 @@ class PredictiveTrainerManager:
     def status_payload(self) -> dict[str, Any]:
         self._reconcile_run_state()
         manifest = self._read_manifest(self._active_run_id) if self._active_run_id else None
+        active_run = self._manifest_for_status(self._active_run_id, manifest) if self._active_run_id else None
         freshness = self._freshness_payload()
         return {
             "status": "running" if self.is_running() else "idle",
             "active_run_id": self._active_run_id,
-            "active_run": manifest,
+            "active_run": active_run,
+            "active_run_stage": (active_run or {}).get("stage"),
+            "active_run_stage_started_at": (active_run or {}).get("stage_started_at"),
+            "active_run_stage_updated_at": (active_run or {}).get("stage_updated_at"),
+            "active_run_stage_message": (active_run or {}).get("stage_message"),
             "pending_restart": self._pending_restart,
             "active_model": self._active_artifacts(),
             "latest_run_context": self._latest_run_context_path(),
