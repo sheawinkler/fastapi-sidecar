@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import sqlite3
 import sys
@@ -426,6 +427,24 @@ def test_status_payload_reports_active_run_stage_and_artifact_flags(tmp_path: Pa
     assert payload["active_run"]["log_paths"]["train_stdout"].endswith("train.stdout.log")
 
 
+def test_status_payload_tolerates_missing_manifest_for_active_run(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager._active_run_id = "run-missing"
+
+    class _NeverDoneTask:
+        def done(self) -> bool:
+            return False
+
+    manager._current_task = _NeverDoneTask()
+
+    payload = manager.status_payload()
+
+    assert payload["status"] == "running"
+    assert payload["active_run_id"] == "run-missing"
+    assert payload["active_run"] is None
+    assert payload["active_run_stage"] is None
+
+
 def test_run_logged_subprocess_streams_output_before_completion(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     script_path = tmp_path / "writer.py"
@@ -472,6 +491,33 @@ def test_run_logged_subprocess_streams_output_before_completion(tmp_path: Path):
     assert result["value"][0] == 0
     assert "stdout-end" in stdout_path.read_text(encoding="utf-8")
     assert "stderr-start" in stderr_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_start_run_seeds_manifest_before_background_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+    gate = asyncio.Event()
+
+    async def _fake_run_cycle(*, run_id: str, requested_by: str, auto_promote):
+        await gate.wait()
+
+    monkeypatch.setattr(manager, "_run_cycle", _fake_run_cycle)
+
+    result = await manager.start_run(requested_by="manual", auto_promote=None)
+    run_id = result["run_id"]
+    manifest = manager._read_manifest(run_id)
+
+    assert result["status"] == "started"
+    assert manifest["stage"] == "dataset"
+    assert manifest["stage_message"] == "queued for dataset build"
+    assert manager.config.lock_path.exists() is True
+
+    manager._current_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await manager._current_task
 
 
 def test_run_cycle_sync_records_stage_progress_and_promotion_record(

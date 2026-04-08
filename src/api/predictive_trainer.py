@@ -8,6 +8,8 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -75,7 +77,15 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp = path.with_name(
+        f"{path.name}.tmp-{os.getpid()}-{threading.get_ident()}-{os.urandom(4).hex()}"
+    )
+    try:
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
 
 
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
@@ -385,6 +395,7 @@ class PredictiveTrainerManager:
     def __init__(self, config: PredictiveTrainerConfig) -> None:
         self.config = config
         self._lock = asyncio.Lock()
+        self._state_io_lock = threading.RLock()
         self._current_task: asyncio.Task | None = None
         self._active_run_id: str | None = None
         self._scheduler_task: asyncio.Task | None = None
@@ -533,12 +544,13 @@ class PredictiveTrainerManager:
         if not run_id:
             return None
         path = self._manifest_path(run_id)
-        if not path.exists():
-            return None
-        try:
-            payload = _read_json(path)
-        except Exception:
-            return None
+        with self._state_io_lock:
+            if not path.exists():
+                return None
+            try:
+                payload = _read_json(path)
+            except Exception:
+                return None
         return payload if isinstance(payload, dict) else None
 
     def _reconcile_run_state(self) -> dict[str, Any]:
@@ -598,7 +610,8 @@ class PredictiveTrainerManager:
         return reconciliation
 
     def _append_history(self, payload: dict[str, Any]) -> None:
-        _append_jsonl(self.config.history_path, payload)
+        with self._state_io_lock:
+            _append_jsonl(self.config.history_path, payload)
 
     async def _run_sync_on_executor(self, func: Any, /, *args: Any, **kwargs: Any) -> Any:
         loop = asyncio.get_running_loop()
@@ -612,12 +625,14 @@ class PredictiveTrainerManager:
 
     def _read_manifest(self, run_id: str) -> dict[str, Any]:
         path = self._manifest_path(run_id)
-        if not path.exists():
-            raise FileNotFoundError(f"missing manifest for run {run_id}")
-        return _read_json(path)
+        with self._state_io_lock:
+            if not path.exists():
+                raise FileNotFoundError(f"missing manifest for run {run_id}")
+            return _read_json(path)
 
     def _write_manifest(self, run_id: str, payload: dict[str, Any]) -> None:
-        _write_json(self._manifest_path(run_id), payload)
+        with self._state_io_lock:
+            _write_json(self._manifest_path(run_id), payload)
 
     def _run_log_paths(self, run_id: str) -> dict[str, str]:
         logs_dir = self._run_dir(run_id) / "logs"
@@ -645,6 +660,84 @@ class PredictiveTrainerManager:
             "eval_pack_md": run_dir / "model_eval_pack.md",
             "promotion_record": run_dir / "promotion.json",
         }
+
+    def _build_run_manifest(
+        self,
+        *,
+        run_id: str,
+        requested_by: str,
+        auto_promote: bool | None,
+        started_at: str,
+    ) -> dict[str, Any]:
+        artifact_paths = self._run_artifact_paths(run_id)
+        return {
+            "run_id": run_id,
+            "requested_by": requested_by,
+            "started_at": started_at,
+            "status": "running",
+            "config": {
+                "algo_repo_dir": str(self.config.algo_repo_dir),
+                "train_interval_secs": self.config.train_interval_secs,
+                "scheduler_poll_secs": self.config.scheduler_poll_secs,
+                "scheduler_enabled": self.config.scheduler_enabled,
+                "auto_promote": self.config.auto_promote if auto_promote is None else bool(auto_promote),
+                "relaunch_enabled": self.config.relaunch_enabled,
+                "train_timeout_secs": self.config.train_timeout_secs,
+                "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
+            },
+            "paths": {
+                "run_dir": str(self._run_dir(run_id)),
+                "model_candidate": str(artifact_paths["model_candidate"]),
+                "training_candidate": str(artifact_paths["training_candidate"]),
+                "calibration_candidate": str(artifact_paths["calibration_candidate"]),
+                "ledger_candidate": str(artifact_paths["ledger_candidate"]),
+                "eval_pack_json": str(artifact_paths["eval_pack_json"]),
+                "eval_pack_md": str(artifact_paths["eval_pack_md"]),
+                "promotion_record": str(artifact_paths["promotion_record"]),
+            },
+            "artifacts": {},
+            "promotion": {
+                "state": "not_attempted",
+                "auto_promote_requested": self.config.auto_promote if auto_promote is None else bool(auto_promote),
+            },
+            "raw_shadow_entry_count": _safe_int(
+                self._shadow_index_stats_cache.get("current_shadow_entry_count"), 0
+            ),
+            "active_model": self._active_artifacts(),
+        }
+
+    def _seed_run_state(
+        self,
+        *,
+        run_id: str,
+        requested_by: str,
+        auto_promote: bool | None,
+    ) -> None:
+        started_at = _utc_iso()
+        run_dir = self._run_dir(run_id)
+        (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+        manifest = self._build_run_manifest(
+            run_id=run_id,
+            requested_by=requested_by,
+            auto_promote=auto_promote,
+            started_at=started_at,
+        )
+        self._update_manifest_stage(
+            run_id,
+            manifest,
+            stage="dataset",
+            stage_message="queued for dataset build",
+        )
+        self._write_manifest(run_id, manifest)
+        with self._state_io_lock:
+            _write_json(
+                self.config.lock_path,
+                {
+                    "run_id": run_id,
+                    "requested_by": requested_by,
+                    "started_at": started_at,
+                },
+            )
 
     def _artifact_existence_flags(self, run_id: str) -> dict[str, bool]:
         paths = self._run_artifact_paths(run_id)
@@ -745,21 +838,22 @@ class PredictiveTrainerManager:
         return str(files[0]) if files else None
 
     def _latest_manifest_summary(self, *, status: str | None = None) -> dict[str, Any] | None:
-        manifests = sorted(
-            self.config.runs_dir.glob("*/manifest.json"),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
-        for path in manifests:
-            try:
-                payload = _read_json(path)
-            except Exception:
-                continue
-            if not isinstance(payload, dict):
-                continue
-            if status is not None and str(payload.get("status") or "").strip().lower() != status:
-                continue
-            return payload
+        with self._state_io_lock:
+            manifests = sorted(
+                self.config.runs_dir.glob("*/manifest.json"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+            for path in manifests:
+                try:
+                    payload = _read_json(path)
+                except Exception:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if status is not None and str(payload.get("status") or "").strip().lower() != status:
+                    continue
+                return payload
         return None
 
     def _default_scheduler_state(self) -> dict[str, Any]:
@@ -788,21 +882,23 @@ class PredictiveTrainerManager:
 
     def _read_scheduler_state(self) -> dict[str, Any]:
         path = self.config.scheduler_state_path
-        if path.exists():
-            try:
-                payload = _read_json(path)
-            except Exception:
-                payload = self._default_scheduler_state()
-                _write_json(path, payload)
-                return payload
-            if isinstance(payload, dict):
-                return payload
-        payload = self._default_scheduler_state()
-        _write_json(path, payload)
-        return payload
+        with self._state_io_lock:
+            if path.exists():
+                try:
+                    payload = _read_json(path)
+                except Exception:
+                    payload = self._default_scheduler_state()
+                    _write_json(path, payload)
+                    return payload
+                if isinstance(payload, dict):
+                    return payload
+            payload = self._default_scheduler_state()
+            _write_json(path, payload)
+            return payload
 
     def _write_scheduler_state(self, payload: dict[str, Any]) -> None:
-        _write_json(self.config.scheduler_state_path, payload)
+        with self._state_io_lock:
+            _write_json(self.config.scheduler_state_path, payload)
 
     def _scheduler_trigger_payload(self) -> dict[str, Any]:
         reconciliation = self._reconcile_run_state()
@@ -1174,6 +1270,11 @@ class PredictiveTrainerManager:
                 }
             run_id = _utc_now().strftime("%Y%m%dT%H%M%SZ") + "-" + os.urandom(4).hex()
             self._mark_scheduler_trigger(run_id=run_id, requested_by=requested_by)
+            self._seed_run_state(
+                run_id=run_id,
+                requested_by=requested_by,
+                auto_promote=auto_promote,
+            )
             self._active_run_id = run_id
             self._current_task = asyncio.create_task(
                 self._run_cycle(run_id=run_id, requested_by=requested_by, auto_promote=auto_promote)
@@ -1200,48 +1301,20 @@ class PredictiveTrainerManager:
         logs_dir = run_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         artifact_paths = self._run_artifact_paths(run_id)
+        manifest = self._read_manifest_if_exists(run_id) or self._build_run_manifest(
+            run_id=run_id,
+            requested_by=requested_by,
+            auto_promote=auto_promote,
+            started_at=_utc_iso(),
+        )
         lock_payload = {
             "run_id": run_id,
             "requested_by": requested_by,
-            "started_at": _utc_iso(),
+            "started_at": str(manifest.get("started_at") or _utc_iso()),
         }
-        _write_json(self.config.lock_path, lock_payload)
+        with self._state_io_lock:
+            _write_json(self.config.lock_path, lock_payload)
 
-        manifest: dict[str, Any] = {
-            "run_id": run_id,
-            "requested_by": requested_by,
-            "started_at": lock_payload["started_at"],
-            "status": "running",
-            "config": {
-                "algo_repo_dir": str(self.config.algo_repo_dir),
-                "train_interval_secs": self.config.train_interval_secs,
-                "scheduler_poll_secs": self.config.scheduler_poll_secs,
-                "scheduler_enabled": self.config.scheduler_enabled,
-                "auto_promote": self.config.auto_promote if auto_promote is None else bool(auto_promote),
-                "relaunch_enabled": self.config.relaunch_enabled,
-                "train_timeout_secs": self.config.train_timeout_secs,
-                "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
-            },
-            "paths": {
-                "run_dir": str(run_dir),
-                "model_candidate": str(artifact_paths["model_candidate"]),
-                "training_candidate": str(artifact_paths["training_candidate"]),
-                "calibration_candidate": str(artifact_paths["calibration_candidate"]),
-                "ledger_candidate": str(artifact_paths["ledger_candidate"]),
-                "eval_pack_json": str(artifact_paths["eval_pack_json"]),
-                "eval_pack_md": str(artifact_paths["eval_pack_md"]),
-                "promotion_record": str(artifact_paths["promotion_record"]),
-            },
-            "artifacts": {},
-            "promotion": {
-                "state": "not_attempted",
-                "auto_promote_requested": self.config.auto_promote if auto_promote is None else bool(auto_promote),
-            },
-            "raw_shadow_entry_count": _safe_int(
-                self._shadow_index_stats_cache.get("current_shadow_entry_count"), 0
-            ),
-            "active_model": self._active_artifacts(),
-        }
         self._update_manifest_stage(
             run_id,
             manifest,
@@ -1564,6 +1637,7 @@ class PredictiveTrainerManager:
             manifest["error"] = {
                 "type": exc.__class__.__name__,
                 "message": str(exc),
+                "traceback": traceback.format_exc(),
             }
             self._write_manifest(run_id, manifest)
             self._append_history(
@@ -1788,7 +1862,7 @@ class PredictiveTrainerManager:
 
     def status_payload(self) -> dict[str, Any]:
         self._reconcile_run_state()
-        manifest = self._read_manifest(self._active_run_id) if self._active_run_id else None
+        manifest = self._read_manifest_if_exists(self._active_run_id) if self._active_run_id else None
         active_run = self._manifest_for_status(self._active_run_id, manifest) if self._active_run_id else None
         freshness = self._freshness_payload()
         return {
