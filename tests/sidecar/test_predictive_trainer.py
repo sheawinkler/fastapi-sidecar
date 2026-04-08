@@ -834,7 +834,11 @@ def test_run_cycle_sync_marks_failed_stage_on_train_error(
             )
             return 0, '{"ok": true}', ""
         if script_name == "train_predictive_entry_model.py":
-            return 7, "", "boom"
+            return (
+                7,
+                '{"kind":"trainer_progress","stage":"shadow_snapshot_start"}\n',
+                '{"error":"snapshot failed for test","reason":"shadow_sqlite_snapshot_failed"}\n',
+            )
         raise AssertionError(f"unexpected command: {cmd}")
 
     monkeypatch.setattr(manager, "_run_logged_subprocess", _fake_logged_subprocess)
@@ -844,7 +848,10 @@ def test_run_cycle_sync_marks_failed_stage_on_train_error(
     manifest = manager._read_manifest("run-failed")
     assert manifest["status"] == "failed"
     assert manifest["stage"] == "failed"
-    assert manifest["error"]["message"] == "train step failed (7): boom"
+    assert (
+        manifest["error"]["message"]
+        == "train step failed (7): shadow sqlite snapshot failed: snapshot failed for test"
+    )
 
 
 @pytest.mark.asyncio

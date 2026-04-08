@@ -151,28 +151,26 @@ def _read_shadow_sqlite_stats(path: Path) -> dict[str, Any]:
         payload["shadow_index_mtime_ns"] = int(getattr(stat_result, "st_mtime_ns", 0))
     except Exception:
         pass
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)
     try:
-        conn.executescript(
-            f"""
-            CREATE TABLE IF NOT EXISTS {PREDICTIVE_CANDIDATE_FIREHOSE_STATS_TABLE} (
-                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                entry_count INTEGER NOT NULL DEFAULT 0,
-                last_seq INTEGER NOT NULL DEFAULT 0,
-                last_write_at TEXT
-            );
-            INSERT OR IGNORE INTO {PREDICTIVE_CANDIDATE_FIREHOSE_STATS_TABLE}
-                (singleton, entry_count, last_seq, last_write_at)
-            VALUES (1, 0, 0, NULL);
-            """
-        )
+        conn.execute("PRAGMA busy_timeout=2000")
+        conn.execute("PRAGMA query_only=ON")
+        stats_table_present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            (PREDICTIVE_CANDIDATE_FIREHOSE_STATS_TABLE,),
+        ).fetchone()
+        if not stats_table_present:
+            payload["shadow_index_count_error"] = "sqlite_stats_table_missing"
+            payload["shadow_index_count_refreshed_at"] = _utc_iso()
+            return payload
         row = conn.execute(
             f"""
             SELECT entry_count, last_seq, last_write_at
             FROM {PREDICTIVE_CANDIDATE_FIREHOSE_STATS_TABLE}
             WHERE singleton = 1
             """
-        ).fetchone()
+        )
+        row = row.fetchone()
         if row:
             payload["current_shadow_entry_count"] = _safe_int(row[0], 0)
             payload["shadow_index_last_seq"] = _safe_int(row[1], 0)
@@ -186,6 +184,25 @@ def _read_shadow_sqlite_stats(path: Path) -> dict[str, Any]:
         return payload
     finally:
         conn.close()
+
+
+def _summarize_logged_subprocess_failure(stdout_text: str, stderr_text: str) -> str:
+    for blob in (stderr_text, stdout_text):
+        lines = [line.strip() for line in blob.splitlines() if line.strip()]
+        for line in reversed(lines):
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            reason = str(payload.get("reason") or "").strip()
+            error = str(payload.get("error") or "").strip()
+            if reason == "shadow_sqlite_snapshot_failed":
+                return f"shadow sqlite snapshot failed: {error}"
+            if reason == "shadow_sqlite_read_failed":
+                return f"shadow sqlite read failed: {error}"
+        if lines:
+            return lines[-1]
+    return ""
 
 
 def _path_text(path: Path, relative_to: Path | None = None) -> str:
@@ -1475,8 +1492,11 @@ class PredictiveTrainerManager:
                 timeout=self.config.train_timeout_secs,
             )
             if train_returncode != 0:
+                failure_detail = _summarize_logged_subprocess_failure(
+                    train_stdout, train_stderr
+                )
                 raise RuntimeError(
-                    f"train step failed ({train_returncode}): {(train_stdout + chr(10) + train_stderr).strip()}"
+                    f"train step failed ({train_returncode}): {failure_detail or (train_stdout + chr(10) + train_stderr).strip()}"
                 )
 
             self._update_manifest_stage(
