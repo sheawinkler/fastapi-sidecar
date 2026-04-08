@@ -1208,7 +1208,7 @@ class PredictiveTrainerManager:
         shadow_quality = model.get("shadow_data_quality") or {}
         training_window = model.get("training_window") or {}
         version = model.get("version")
-        return {
+        attestation = {
             "artifacts": {
                 "dataset_path": _path_text(dataset_path, self.config.algo_repo_dir),
                 "dataset_summary_path": _path_text(dataset_summary_path, self.config.algo_repo_dir),
@@ -1262,6 +1262,21 @@ class PredictiveTrainerManager:
                 "training_rows": _safe_int(data_quality.get("row_count"), 0),
             },
         }
+        for key in (
+            "source_provenance_class_counts_shadow",
+            "source_provenance_class_counts_executed",
+            "source_provenance_class_counts_overall",
+            "yellowstone_authoritative_shadow_rows",
+            "yellowstone_authoritative_executed_rows",
+            "mixed_event_flow_shadow_rows",
+            "legacy_or_unattributed_rows",
+            "positive_negative_split_by_provenance",
+            "event_policy_provenance_executed_priors",
+            "realized_prior_sample_sufficient",
+        ):
+            if key in model:
+                attestation[key] = model.get(key)
+        return attestation
 
     def _evaluate_candidate(
         self,

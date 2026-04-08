@@ -192,6 +192,81 @@ def test_evaluate_candidate_rejects_positive_share_collapse(tmp_path: Path):
     assert "positive_share_collapsed" in result["issues"]
 
 
+def test_build_attestation_carries_provenance_summary(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    candidate_model_path = tmp_path / "model_candidate.json"
+    candidate_model_path.write_text(
+        json.dumps(
+            {
+                "version": "predictive-entry-v12.2",
+                "trained_at": "2026-04-08T00:00:00Z",
+                "data_quality": {
+                    "row_count": 12,
+                    "positive_net_sol_count": 8,
+                    "negative_net_sol_count": 4,
+                },
+                "executed_data_quality": {"row_count": 2},
+                "shadow_data_quality": {"row_count": 10},
+                "training_window": {
+                    "rows": 12,
+                    "executed_rows": 2,
+                    "shadow_rows": 10,
+                    "excluded_invalid_target_rows": {"executed": 0, "shadow": 0},
+                },
+                "source_provenance_class_counts_shadow": {"yellowstone_authoritative": 9},
+                "source_provenance_class_counts_executed": {
+                    "yellowstone_authoritative": 2
+                },
+                "yellowstone_authoritative_shadow_rows": 9,
+                "yellowstone_authoritative_executed_rows": 2,
+                "mixed_event_flow_shadow_rows": 1,
+                "legacy_or_unattributed_rows": 3,
+                "positive_negative_split_by_provenance": {
+                    "shadow": {
+                        "yellowstone_authoritative": {
+                            "positives": 7,
+                            "negatives": 2,
+                            "total": 9,
+                            "positive_rate": 0.7777,
+                        }
+                    }
+                },
+                "event_policy_provenance_executed_priors": {
+                    "ignition|fast_fee_clear_lock|yellowstone_authoritative": {
+                        "sample_count": 2,
+                        "effective_sample_count": 5.0,
+                        "realized_prior_sample_sufficient": False,
+                    }
+                },
+                "realized_prior_sample_sufficient": {
+                    "threshold_effective_sample_count": 20.0,
+                    "by_event_policy_provenance": {
+                        "ignition|fast_fee_clear_lock|yellowstone_authoritative": False
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    attestation = manager._build_attestation(
+        candidate_model_path=candidate_model_path,
+        dataset_path=tmp_path / "dataset.jsonl",
+        dataset_summary={"ok": True, "rows": 12, "quality_gates": {}, "summary": "summary"},
+        dataset_summary_path=tmp_path / "dataset_summary.json",
+        candidate_output_hint=tmp_path / "candidate.json",
+    )
+
+    assert attestation["yellowstone_authoritative_shadow_rows"] == 9
+    assert attestation["mixed_event_flow_shadow_rows"] == 1
+    assert (
+        attestation["event_policy_provenance_executed_priors"][
+            "ignition|fast_fee_clear_lock|yellowstone_authoritative"
+        ]["effective_sample_count"]
+        == 5.0
+    )
+
+
 @pytest.mark.asyncio
 async def test_start_run_prevents_overlap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
