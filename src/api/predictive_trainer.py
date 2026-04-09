@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 PREDICTIVE_CANDIDATE_FIREHOSE_TABLE = "predictive_candidate_firehose_shadow_outcomes"
@@ -454,6 +454,7 @@ class PredictiveTrainerManager:
         self._active_run_id: str | None = None
         self._scheduler_task: asyncio.Task | None = None
         self._pending_restart: dict[str, Any] | None = None
+        self._guidance_subscriber_count_provider: Callable[[], int] | None = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sidecar-trainer")
         self._shadow_index_stats_cache = self._bootstrap_shadow_index_stats_cache()
         if self.config.scheduler_disabled_reason:
@@ -464,6 +465,19 @@ class PredictiveTrainerManager:
                 file=sys.stderr,
                 flush=True,
             )
+
+    def set_guidance_subscriber_count_provider(
+        self, provider: Callable[[], int] | None
+    ) -> None:
+        self._guidance_subscriber_count_provider = provider
+
+    def _guidance_subscriber_count(self) -> int:
+        if self._guidance_subscriber_count_provider is None:
+            return 0
+        try:
+            return max(0, int(self._guidance_subscriber_count_provider()))
+        except Exception:
+            return 0
 
     def _bootstrap_shadow_index_stats_cache(self) -> dict[str, Any]:
         state_path = self.config.scheduler_state_path
@@ -1202,6 +1216,18 @@ class PredictiveTrainerManager:
                 _safe_int(data_quality.get("negative_net_sol_count"), 0),
             ),
             "trained_at": validation_section.get("trained_at"),
+            "selected_shadow_row_count": _safe_int(
+                model.get("selected_shadow_row_count"),
+                _safe_int(training_section.get("shadow_rows"), 0),
+            ),
+            "selected_executed_row_count": _safe_int(
+                model.get("selected_executed_row_count"),
+                _safe_int(training_section.get("executed_rows"), 0),
+            ),
+            "selected_total_training_rows": _safe_int(
+                model.get("selected_total_training_rows"),
+                _safe_int(training_section.get("rows"), 0),
+            ),
             "version": training_section.get("version") or model.get("version"),
             "calibration_global_mae_sol": _safe_float(
                 model.get("calibration", {}).get("global_mae_sol")
@@ -1212,7 +1238,71 @@ class PredictiveTrainerManager:
                 .get("p_positive_after_cost")
             ),
             "calibration_rows": _safe_int(calibration.get("rows"), 0),
+            "executed_prior_audit": model.get("executed_prior_audit"),
         }
+
+    def _is_repo_launch_ready(self, repo_state: dict[str, Any]) -> bool:
+        return bool(
+            repo_state.get("status_clean")
+            and repo_state.get("branch") == "main"
+            and repo_state.get("head_matches_origin_main")
+        )
+
+    def _effective_restart_state(
+        self,
+        *,
+        latest_completed_run_id: str | None,
+        latest_completed_promotion_state: str | None,
+        latest_completed_run_raw_shadow_entry_count: int,
+        active_model_raw_shadow_entry_count: int,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        pending_restart = (
+            dict(self._pending_restart)
+            if isinstance(self._pending_restart, dict)
+            else None
+        )
+        effective_promotion_state = latest_completed_promotion_state
+        if not pending_restart:
+            return None, effective_promotion_state
+
+        pending_run_id = str(
+            pending_restart.get("run_id") or latest_completed_run_id or ""
+        ).strip() or None
+        live_state = self._current_open_positions(
+            self._run_dir(pending_run_id or "status")
+        )
+        open_positions_remaining = _safe_int(live_state.get("open_positions_remaining"), 0)
+        repo_state = self._repo_launch_ready()
+        promoted_model_is_active = bool(
+            latest_completed_run_raw_shadow_entry_count > 0
+            and active_model_raw_shadow_entry_count >= latest_completed_run_raw_shadow_entry_count
+        )
+        current_model_is_serving = self._guidance_subscriber_count() > 0 or promoted_model_is_active
+
+        if open_positions_remaining > 0:
+            pending_restart = {
+                "run_id": pending_run_id,
+                "reason": "open_positions_remaining",
+                "open_positions_remaining": open_positions_remaining,
+            }
+            effective_promotion_state = "pending_restart_open_positions"
+        elif not self._is_repo_launch_ready(repo_state):
+            pending_restart = {
+                "run_id": pending_run_id,
+                "reason": "repo_not_launch_ready",
+                "repo_state": repo_state,
+            }
+            effective_promotion_state = "pending_restart_repo_not_launch_ready"
+        elif current_model_is_serving and (
+            latest_completed_promotion_state == "promoted_pending_restart"
+            or str(pending_restart.get("reason") or "").strip()
+            in {"repo_not_launch_ready", "open_positions_remaining"}
+        ):
+            pending_restart = None
+            effective_promotion_state = "promoted_current"
+
+        self._pending_restart = pending_restart
+        return pending_restart, effective_promotion_state
 
     def _dataset_summary(self) -> dict[str, Any]:
         if self.config.dataset_summary_path.exists():
@@ -1283,7 +1373,20 @@ class PredictiveTrainerManager:
                 "reason_groups": ["dead_timeout", "trailing_stop", "liquidity_collapse", "stop_loss", "other"],
                 "rows": _safe_int(training_window.get("rows"), _safe_int(data_quality.get("row_count"), 0)),
                 "raw_shadow_entry_count": _safe_int(
-                    self._shadow_index_stats_cache.get("current_shadow_entry_count"), 0
+                    model.get("raw_shadow_entry_count"),
+                    _safe_int(self._shadow_index_stats_cache.get("current_shadow_entry_count"), 0),
+                ),
+                "selected_shadow_row_count": _safe_int(
+                    model.get("selected_shadow_row_count"),
+                    _safe_int(training_window.get("shadow_rows"), 0),
+                ),
+                "selected_executed_row_count": _safe_int(
+                    model.get("selected_executed_row_count"),
+                    _safe_int(training_window.get("executed_rows"), 0),
+                ),
+                "selected_total_training_rows": _safe_int(
+                    model.get("selected_total_training_rows"),
+                    _safe_int(training_window.get("rows"), 0),
                 ),
                 "shadow_rows": _safe_int(
                     training_window.get("shadow_rows"),
@@ -1311,6 +1414,7 @@ class PredictiveTrainerManager:
             "positive_negative_split_by_provenance",
             "event_policy_provenance_executed_priors",
             "realized_prior_sample_sufficient",
+            "executed_prior_audit",
         ):
             if key in model:
                 attestation[key] = model.get(key)
@@ -1921,6 +2025,12 @@ class PredictiveTrainerManager:
         latest_completed_promotion_state = (
             str(latest_completed_promotion.get("state") or "").strip() or None
         )
+        pending_restart, effective_promotion_state = self._effective_restart_state(
+            latest_completed_run_id=latest_completed_run_id,
+            latest_completed_promotion_state=latest_completed_promotion_state,
+            latest_completed_run_raw_shadow_entry_count=latest_completed_run_raw_shadow_entry_count,
+            active_model_raw_shadow_entry_count=active_model_raw_shadow_entry_count,
+        )
         lag_baseline = (
             active_model_raw_shadow_entry_count
             if active_model_raw_shadow_entry_count > 0
@@ -1952,7 +2062,9 @@ class PredictiveTrainerManager:
             "latest_completed_run_status": latest_completed_run_status,
             "latest_completed_run_raw_shadow_entry_count": latest_completed_run_raw_shadow_entry_count,
             "latest_completed_promotion_state": latest_completed_promotion_state,
+            "effective_promotion_state": effective_promotion_state,
             "model_freshness_state": model_freshness_state,
+            "pending_restart": pending_restart,
         }
 
     def _scheduler_contract_payload(self) -> dict[str, Any]:
@@ -1984,7 +2096,7 @@ class PredictiveTrainerManager:
             "scheduler_poll_secs": self.config.scheduler_poll_secs,
             "train_timeout_secs": self.config.train_timeout_secs,
             "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
-            "pending_restart": self._pending_restart,
+            "pending_restart": freshness.get("pending_restart"),
             "scheduler_trigger": self._scheduler_trigger_payload(),
             **freshness,
         }
@@ -2003,7 +2115,7 @@ class PredictiveTrainerManager:
             "active_run_stage_started_at": (active_run or {}).get("stage_started_at"),
             "active_run_stage_updated_at": (active_run or {}).get("stage_updated_at"),
             "active_run_stage_message": (active_run or {}).get("stage_message"),
-            "pending_restart": self._pending_restart,
+            "pending_restart": freshness.get("pending_restart"),
             "active_model": self._active_artifacts(),
             "latest_run_context": self._latest_run_context_path(),
             "shadow_index_path": str(self.config.shadow_sqlite_path),

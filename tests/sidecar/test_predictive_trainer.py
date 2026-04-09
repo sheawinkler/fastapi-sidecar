@@ -223,6 +223,21 @@ def test_build_attestation_carries_provenance_summary(tmp_path: Path):
                 "yellowstone_authoritative_executed_rows": 2,
                 "mixed_event_flow_shadow_rows": 1,
                 "legacy_or_unattributed_rows": 3,
+                "selected_shadow_row_count": 10,
+                "selected_executed_row_count": 2,
+                "selected_total_training_rows": 12,
+                "raw_shadow_entry_count": 222,
+                "executed_prior_audit": [
+                    {
+                        "timestamp": "2026-04-06T18:19:35.789997Z",
+                        "mint": "mint-a",
+                        "source_provenance_class": "yellowstone_authoritative",
+                        "strategy_family": "EVENT_FLOW_ACCELERATION",
+                        "exit_policy": "fast_fee_clear_lock",
+                        "net_sol": 0.003054,
+                        "exit_reason": "trailing_stop_loss",
+                    }
+                ],
                 "positive_negative_split_by_provenance": {
                     "shadow": {
                         "yellowstone_authoritative": {
@@ -267,6 +282,11 @@ def test_build_attestation_carries_provenance_summary(tmp_path: Path):
         ]["effective_sample_count"]
         == 5.0
     )
+    assert attestation["training"]["raw_shadow_entry_count"] == 222
+    assert attestation["training"]["selected_shadow_row_count"] == 10
+    assert attestation["training"]["selected_executed_row_count"] == 2
+    assert attestation["training"]["selected_total_training_rows"] == 12
+    assert attestation["executed_prior_audit"][0]["mint"] == "mint-a"
 
 
 @pytest.mark.asyncio
@@ -1129,6 +1149,83 @@ def test_promote_candidate_copies_next_state_ledger(tmp_path: Path, monkeypatch:
 
     assert result["state"] == "promoted_pending_restart"
     assert manager.config.next_state_ledger_path.read_text(encoding="utf-8") == '{"row":1}\n'
+
+
+def test_health_payload_clears_stale_repo_not_launch_ready_pending_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager.set_guidance_subscriber_count_provider(lambda: 1)
+    manager.config.training_path.write_text(
+        json.dumps(
+            {
+                "training": {
+                    "rows": 120,
+                    "shadow_rows": 110,
+                    "raw_shadow_entry_count": 220,
+                    "executed_rows": 6,
+                    "version": "predictive-entry-v12.2",
+                },
+                "validation": {
+                    "positive_rows": 70,
+                    "negative_rows": 50,
+                    "trained_at": "2026-04-09T03:36:05Z",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager.config.model_path.write_text(
+        json.dumps(
+            {
+                "version": "predictive-entry-v12.2",
+                "trained_at": "2026-04-09T03:36:05Z",
+                "selected_shadow_row_count": 110,
+                "selected_executed_row_count": 6,
+                "selected_total_training_rows": 116,
+                "executed_prior_audit": [{"mint": "mint-a"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager.config.calibration_path.write_text(json.dumps({"rows": 8}), encoding="utf-8")
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 220)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+    manager._write_manifest(
+        "run-stale-pending",
+        {
+            "run_id": "run-stale-pending",
+            "status": "completed",
+            "raw_shadow_entry_count": 220,
+            "promotion": {"state": "promoted_pending_restart"},
+        },
+    )
+    manager._pending_restart = {
+        "run_id": "run-stale-pending",
+        "reason": "repo_not_launch_ready",
+        "repo_state": {
+            "branch": "main",
+            "status_clean": False,
+            "head_matches_origin_main": True,
+        },
+    }
+    monkeypatch.setattr(
+        manager,
+        "_repo_launch_ready",
+        lambda: {"branch": "main", "status_clean": True, "head_matches_origin_main": True},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_current_open_positions",
+        lambda _work_dir: {"ok": True, "open_positions_remaining": 0},
+    )
+
+    payload = manager.health_payload()
+
+    assert payload["latest_completed_promotion_state"] == "promoted_pending_restart"
+    assert payload["effective_promotion_state"] == "promoted_current"
+    assert payload["pending_restart"] is None
+    assert manager._pending_restart is None
 
 
 def test_history_payload_reads_jsonl(tmp_path: Path):

@@ -434,6 +434,7 @@ _CALIBRATOR_ROOT = Path(os.getenv("CALIBRATOR_ROOT", "models/saved/calibrator"))
 _calibrator: Optional[CalibratorBundle]
 _calibrator, _calibrator_reason = load_latest_calibrator(_CALIBRATOR_ROOT)
 _trainer_manager = PredictiveTrainerManager(PredictiveTrainerConfig.from_env(_data_dir()))
+_trainer_manager.set_guidance_subscriber_count_provider(lambda: len(_guidance_subscribers))
 
 DEFAULT_SIGNAL_FEED_URL = "http://127.0.0.1:8075/signals/latest?limit=200"
 SIGNAL_FEED_URL = os.getenv("SIGNAL_FEED_URL", DEFAULT_SIGNAL_FEED_URL)
