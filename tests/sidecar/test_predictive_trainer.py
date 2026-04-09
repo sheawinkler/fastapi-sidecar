@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import errno
 import json
 import sqlite3
 import sys
@@ -9,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+import src.api.predictive_trainer as predictive_trainer
 from src.api.predictive_trainer import PredictiveTrainerConfig, PredictiveTrainerManager
 
 
@@ -319,6 +321,44 @@ def test_python_cmd_forces_unbuffered_python(tmp_path: Path):
     cmd = manager._python_cmd(Path("/tmp/example.py"), "--flag", "value")
 
     assert cmd == ["python3", "-u", "/tmp/example.py", "--flag", "value"]
+
+
+def test_read_json_retries_resource_deadlock_then_succeeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    path = tmp_path / "model.json"
+    path.write_text('{"ok": true}', encoding="utf-8")
+    real_read_text = Path.read_text
+    attempts = {"count": 0}
+
+    def _flaky_read_text(self: Path, *args, **kwargs):
+        if self == path and attempts["count"] < 2:
+            attempts["count"] += 1
+            raise OSError(errno.EDEADLK, "Resource deadlock avoided")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _flaky_read_text)
+
+    assert predictive_trainer._read_json(path) == {"ok": True}
+    assert attempts["count"] == 2
+
+
+def test_active_artifacts_degrades_when_model_read_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager.config.model_path.write_text('{"ok": true}', encoding="utf-8")
+    real_read_json = predictive_trainer._read_json
+
+    def _flaky_read_json(path: Path):
+        if path == manager.config.model_path:
+            raise OSError(errno.EDEADLK, "Resource deadlock avoided")
+        return real_read_json(path)
+
+    monkeypatch.setattr(predictive_trainer, "_read_json", _flaky_read_json)
+
+    payload = manager._active_artifacts()
+
+    assert payload["raw_shadow_entry_count"] == 0
+    assert payload["trained_at"] is None
+    assert payload["model_read_error"]["type"] == "OSError"
+    assert "Resource deadlock avoided" in payload["model_read_error"]["message"]
 
 
 def test_scheduler_trigger_skips_auto_retrain_when_active_model_matches_current_corpus(tmp_path: Path):

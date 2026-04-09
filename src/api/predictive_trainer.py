@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import os
 import shutil
@@ -9,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -72,7 +74,23 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+    last_error: Exception | None = None
+    for delay in (0.0, 0.05, 0.1, 0.2, 0.4):
+        if delay > 0.0:
+            time.sleep(delay)
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            last_error = exc
+        except OSError as exc:
+            last_error = exc
+            if exc.errno not in {errno.EDEADLK, errno.EAGAIN, 11}:
+                raise
+        except Exception:
+            raise
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"failed to read json from {path}")
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -1136,11 +1154,28 @@ class PredictiveTrainerManager:
         }
 
     def _active_artifacts(self) -> dict[str, Any]:
-        model = _read_json(self.config.model_path) if self.config.model_path.exists() else {}
-        training = _read_json(self.config.training_path) if self.config.training_path.exists() else {}
-        calibration = (
-            _read_json(self.config.calibration_path) if self.config.calibration_path.exists() else {}
-        )
+        def _read_runtime_json(path: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
+            if not path.exists():
+                return {}, None
+            try:
+                payload = _read_json(path)
+            except Exception as exc:
+                return {}, {
+                    "path": str(path),
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                }
+            if not isinstance(payload, dict):
+                return {}, {
+                    "path": str(path),
+                    "type": "InvalidJsonPayload",
+                    "message": "expected top-level object",
+                }
+            return payload, None
+
+        model, model_read_error = _read_runtime_json(self.config.model_path)
+        training, training_read_error = _read_runtime_json(self.config.training_path)
+        calibration, calibration_read_error = _read_runtime_json(self.config.calibration_path)
         training_section = training.get("training") or {}
         validation_section = training.get("validation") or {}
         data_quality = model.get("data_quality") or {}
@@ -1149,6 +1184,9 @@ class PredictiveTrainerManager:
             "training_path": str(self.config.training_path),
             "calibration_path": str(self.config.calibration_path),
             "next_state_ledger_path": str(self.config.next_state_ledger_path),
+            "model_read_error": model_read_error,
+            "training_read_error": training_read_error,
+            "calibration_read_error": calibration_read_error,
             "training_rows": _safe_int(
                 training_section.get("rows"), _safe_int(data_quality.get("row_count"), 0)
             ),
