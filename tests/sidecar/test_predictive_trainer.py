@@ -1206,13 +1206,23 @@ def test_health_payload_clears_stale_repo_not_launch_ready_pending_restart(
         "repo_state": {
             "branch": "main",
             "status_clean": False,
+            "tracked_status_clean": False,
             "head_matches_origin_main": True,
+            "untracked_count": 12,
+            "untracked_examples": ["docs/DEVELOPMENT 2.md"],
         },
     }
     monkeypatch.setattr(
         manager,
         "_repo_launch_ready",
-        lambda: {"branch": "main", "status_clean": True, "head_matches_origin_main": True},
+        lambda: {
+            "branch": "main",
+            "status_clean": True,
+            "tracked_status_clean": True,
+            "head_matches_origin_main": True,
+            "untracked_count": 9,
+            "untracked_examples": ["docs/DEVELOPMENT 2.md", "scripts/build_mc_dataset 2.py"],
+        },
     )
     monkeypatch.setattr(
         manager,
@@ -1225,6 +1235,13 @@ def test_health_payload_clears_stale_repo_not_launch_ready_pending_restart(
     assert payload["latest_completed_promotion_state"] == "promoted_pending_restart"
     assert payload["effective_promotion_state"] == "promoted_current"
     assert payload["pending_restart"] is None
+    assert payload["repo_state"]["status_clean"] is True
+    assert payload["repo_state"]["tracked_status_clean"] is True
+    assert payload["repo_state"]["untracked_count"] == 9
+    assert payload["repo_state"]["untracked_examples"] == [
+        "docs/DEVELOPMENT 2.md",
+        "scripts/build_mc_dataset 2.py",
+    ]
     assert manager._pending_restart is None
 
 

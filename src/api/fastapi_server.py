@@ -151,6 +151,57 @@ async def _append_jsonl_async(path: Path, record: Dict[str, Any]) -> None:
     await asyncio.to_thread(_append_jsonl, path, record)
 
 
+def _extract_predictive_authority(features: FeaturePayload | None) -> Dict[str, Any]:
+    authority: Dict[str, Any] = {
+        "buy_authority_mode": "pass",
+        "buy_blocker_stage": None,
+        "buy_blocker_reason": None,
+        "size_zero_reason": None,
+    }
+    if not isinstance(features, dict):
+        return authority
+
+    metadata = features.get("metadata")
+    if not isinstance(metadata, dict):
+        return authority
+
+    contract = metadata.get("predictive_execution_contract")
+    if not isinstance(contract, dict):
+        contract = {}
+
+    predictive = metadata.get("predictive")
+    trace = predictive.get("selected_selector_trace") if isinstance(predictive, dict) else None
+    if not isinstance(trace, dict):
+        trace = contract.get("selected_selector_trace")
+    if not isinstance(trace, dict):
+        trace = {}
+
+    def pick_str(*values: Any) -> Optional[str]:
+        for value in values:
+            if isinstance(value, str):
+                trimmed = value.strip()
+                if trimmed:
+                    return trimmed
+        return None
+
+    authority["buy_authority_mode"] = (
+        pick_str(contract.get("buy_authority_mode"), trace.get("buy_authority_mode")) or "pass"
+    )
+    authority["buy_blocker_stage"] = pick_str(
+        contract.get("buy_blocker_stage"),
+        trace.get("buy_blocker_stage"),
+    )
+    authority["buy_blocker_reason"] = pick_str(
+        contract.get("buy_blocker_reason"),
+        trace.get("buy_blocker_reason"),
+    )
+    authority["size_zero_reason"] = pick_str(
+        contract.get("size_zero_reason"),
+        trace.get("size_zero_reason"),
+    )
+    return authority
+
+
 async def _predict_with_executor(
     *,
     feature_vector: Optional[List[float]],
@@ -297,6 +348,10 @@ class PredictResponse(BaseModel):
     size_multiplier: float = 1.0
     risk_multiplier: float = 1.0
     kelly_fraction: float = 0.02
+    buy_authority_mode: str = "pass"
+    buy_blocker_stage: Optional[str] = None
+    buy_blocker_reason: Optional[str] = None
+    size_zero_reason: Optional[str] = None
     notes: Optional[str] = None
 
     latency_ms: float
@@ -354,6 +409,10 @@ class GuidancePayload(BaseModel):
     size_multiplier: float = 1.0
     risk_multiplier: float = 1.0
     kelly_fraction: float = 0.02
+    buy_authority_mode: str = "pass"
+    buy_blocker_stage: Optional[str] = None
+    buy_blocker_reason: Optional[str] = None
+    size_zero_reason: Optional[str] = None
     notes: Optional[str] = None
     memory_ref: Optional[str] = None
 
@@ -1422,6 +1481,8 @@ async def predict(req: PredictRequest) -> PredictResponse:
         override_payload["applied_multiplier"] = override.multiplier
         metadata["signal_override"] = override_payload
 
+    predictive_authority = _extract_predictive_authority(features)
+
     # Derive lightweight guidance multipliers. These are intentionally conservative; the Rust
     # executor applies them *after* its own risk engine.
     side_hint: Optional[str] = None
@@ -1456,6 +1517,7 @@ async def predict(req: PredictRequest) -> PredictResponse:
         "size_multiplier": guidance_size_multiplier,
         "risk_multiplier": guidance_risk_multiplier,
         "kelly_fraction": guidance_kelly_fraction,
+        **predictive_authority,
     }
 
     # Push a low-latency guidance event (pre-override) for subscribers.
@@ -1468,6 +1530,10 @@ async def predict(req: PredictRequest) -> PredictResponse:
             size_multiplier=guidance_size_multiplier,
             risk_multiplier=guidance_risk_multiplier,
             kelly_fraction=guidance_kelly_fraction,
+            buy_authority_mode=str(predictive_authority.get("buy_authority_mode") or "pass"),
+            buy_blocker_stage=predictive_authority.get("buy_blocker_stage"),
+            buy_blocker_reason=predictive_authority.get("buy_blocker_reason"),
+            size_zero_reason=predictive_authority.get("size_zero_reason"),
             notes="predict",
         )
         asyncio.create_task(_broadcast_guidance(guidance))
@@ -1483,6 +1549,10 @@ async def predict(req: PredictRequest) -> PredictResponse:
         size_multiplier=guidance_size_multiplier,
         risk_multiplier=guidance_risk_multiplier,
         kelly_fraction=guidance_kelly_fraction,
+        buy_authority_mode=str(predictive_authority.get("buy_authority_mode") or "pass"),
+        buy_blocker_stage=predictive_authority.get("buy_blocker_stage"),
+        buy_blocker_reason=predictive_authority.get("buy_blocker_reason"),
+        size_zero_reason=predictive_authority.get("size_zero_reason"),
         notes="predict",
         latency_ms=latency_ms,
         model=str(result.get("model", model or "ensemble")),

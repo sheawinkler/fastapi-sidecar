@@ -1131,40 +1131,47 @@ class PredictiveTrainerManager:
         }
 
     def _repo_launch_ready(self) -> dict[str, Any]:
-        branch = subprocess.run(
-            ["git", "branch", "--show-current"],
-            cwd=self.config.algo_repo_dir,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        status = subprocess.run(
-            ["git", "status", "--short"],
-            cwd=self.config.algo_repo_dir,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=self.config.algo_repo_dir,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        origin_main = subprocess.run(
-            ["git", "rev-parse", "origin/main"],
-            cwd=self.config.algo_repo_dir,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        def _git_output(*args: str) -> tuple[str, str | None]:
+            try:
+                result = subprocess.run(
+                    ["git", *args],
+                    cwd=self.config.algo_repo_dir,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return result.stdout.strip(), None
+            except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+                return "", str(exc)
+
+        branch, branch_error = _git_output("branch", "--show-current")
+        tracked_status, tracked_status_error = _git_output(
+            "status", "--short", "--untracked-files=no"
+        )
+        untracked_output, untracked_error = _git_output(
+            "ls-files", "--others", "--exclude-standard"
+        )
+        head, head_error = _git_output("rev-parse", "HEAD")
+        origin_main, origin_main_error = _git_output("rev-parse", "origin/main")
+        repo_probe_error = (
+            branch_error
+            or tracked_status_error
+            or untracked_error
+            or head_error
+            or origin_main_error
+        )
+        untracked = untracked_output.splitlines() if untracked_output else []
+        tracked_clean = bool(not tracked_status and not repo_probe_error)
         return {
             "branch": branch,
-            "status_clean": not status,
+            "status_clean": tracked_clean,
+            "tracked_status_clean": tracked_clean,
+            "untracked_count": len(untracked),
+            "untracked_examples": untracked[:10],
             "head": head,
             "origin_main": origin_main,
             "head_matches_origin_main": bool(head and origin_main and head == origin_main),
+            "repo_probe_error": repo_probe_error,
         }
 
     def _active_artifacts(self) -> dict[str, Any]:
@@ -1255,6 +1262,7 @@ class PredictiveTrainerManager:
         latest_completed_promotion_state: str | None,
         latest_completed_run_raw_shadow_entry_count: int,
         active_model_raw_shadow_entry_count: int,
+        repo_state: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, str | None]:
         pending_restart = (
             dict(self._pending_restart)
@@ -1272,7 +1280,7 @@ class PredictiveTrainerManager:
             self._run_dir(pending_run_id or "status")
         )
         open_positions_remaining = _safe_int(live_state.get("open_positions_remaining"), 0)
-        repo_state = self._repo_launch_ready()
+        repo_state = dict(repo_state or self._repo_launch_ready())
         promoted_model_is_active = bool(
             latest_completed_run_raw_shadow_entry_count > 0
             and active_model_raw_shadow_entry_count >= latest_completed_run_raw_shadow_entry_count
@@ -2015,6 +2023,7 @@ class PredictiveTrainerManager:
         trigger = self._scheduler_trigger_payload()
         current_shadow_entry_count = _safe_int(trigger.get("current_shadow_entry_count"), 0)
         new_shadow_rows_since_trigger = _safe_int(trigger.get("new_shadow_rows_since_trigger"), 0)
+        repo_state = self._repo_launch_ready()
         latest_manifest = self._latest_manifest_summary(status="completed") or {}
         latest_completed_run_id = str(latest_manifest.get("run_id") or "").strip() or None
         latest_completed_run_status = str(latest_manifest.get("status") or "").strip() or None
@@ -2030,6 +2039,7 @@ class PredictiveTrainerManager:
             latest_completed_promotion_state=latest_completed_promotion_state,
             latest_completed_run_raw_shadow_entry_count=latest_completed_run_raw_shadow_entry_count,
             active_model_raw_shadow_entry_count=active_model_raw_shadow_entry_count,
+            repo_state=repo_state,
         )
         lag_baseline = (
             active_model_raw_shadow_entry_count
@@ -2065,6 +2075,7 @@ class PredictiveTrainerManager:
             "effective_promotion_state": effective_promotion_state,
             "model_freshness_state": model_freshness_state,
             "pending_restart": pending_restart,
+            "repo_state": repo_state,
         }
 
     def _scheduler_contract_payload(self) -> dict[str, Any]:
