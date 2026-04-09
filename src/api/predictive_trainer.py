@@ -155,13 +155,18 @@ def _default_shadow_index_stats_cache() -> dict[str, Any]:
         "shadow_index_source": "sqlite_stats",
         "shadow_index_last_seq": 0,
         "shadow_index_last_write_at": None,
+        "shadow_index_probe_state": "unavailable",
+        "shadow_index_probe_error": None,
     }
 
 
 def _read_shadow_sqlite_stats(path: Path) -> dict[str, Any]:
     payload = _default_shadow_index_stats_cache()
+    payload["shadow_index_count_cached"] = False
     if not path.exists():
         payload["shadow_index_count_error"] = "sqlite_missing"
+        payload["shadow_index_probe_error"] = "sqlite_missing"
+        payload["shadow_index_count_refreshed_at"] = _utc_iso()
         return payload
     try:
         stat_result = path.stat()
@@ -179,6 +184,7 @@ def _read_shadow_sqlite_stats(path: Path) -> dict[str, Any]:
         ).fetchone()
         if not stats_table_present:
             payload["shadow_index_count_error"] = "sqlite_stats_table_missing"
+            payload["shadow_index_probe_error"] = "sqlite_stats_table_missing"
             payload["shadow_index_count_refreshed_at"] = _utc_iso()
             return payload
         row = conn.execute(
@@ -195,9 +201,12 @@ def _read_shadow_sqlite_stats(path: Path) -> dict[str, Any]:
             payload["shadow_index_last_write_at"] = row[2]
         payload["shadow_index_count_refreshed_at"] = _utc_iso()
         payload["shadow_index_count_error"] = None
+        payload["shadow_index_probe_state"] = "available"
+        payload["shadow_index_probe_error"] = None
         return payload
     except Exception as exc:
         payload["shadow_index_count_error"] = str(exc)
+        payload["shadow_index_probe_error"] = str(exc)
         payload["shadow_index_count_refreshed_at"] = _utc_iso()
         return payload
     finally:
@@ -513,12 +522,76 @@ class PredictiveTrainerManager:
                     "shadow_index_last_write_at": payload.get(
                         "shadow_index_last_write_at"
                     ),
+                    "shadow_index_probe_state": payload.get("shadow_index_probe_state")
+                    or "stale_cached",
+                    "shadow_index_probe_error": payload.get("shadow_index_probe_error")
+                    or payload.get("shadow_index_count_error"),
                 }
                 if cached["shadow_index_count_refreshed_at"] is not None or cached[
                     "current_shadow_entry_count"
                 ] > 0:
                     return cached
         return _read_shadow_sqlite_stats(self.config.shadow_sqlite_path)
+
+    def _shadow_index_probe_age_secs(
+        self, stats: dict[str, Any] | None = None
+    ) -> float | None:
+        payload = stats or self._shadow_index_stats_cache
+        refreshed_at = _parse_utc_ts(str(payload.get("shadow_index_count_refreshed_at") or ""))
+        if refreshed_at is None:
+            return None
+        return max(0.0, (_utc_now() - refreshed_at).total_seconds())
+
+    def _shadow_index_cache_should_refresh(
+        self, stats: dict[str, Any] | None = None
+    ) -> bool:
+        payload = stats or self._shadow_index_stats_cache
+        if not isinstance(payload, dict):
+            return True
+        probe_state = (
+            str(payload.get("shadow_index_probe_state") or "").strip() or "unavailable"
+        )
+        probe_error = str(
+            payload.get("shadow_index_probe_error")
+            or payload.get("shadow_index_count_error")
+            or ""
+        ).strip()
+        if probe_error:
+            return True
+        probe_age_secs = self._shadow_index_probe_age_secs(payload)
+        if probe_age_secs is None or probe_age_secs > max(
+            5.0, float(self.config.scheduler_poll_secs)
+        ):
+            return True
+
+        path = self.config.shadow_sqlite_path
+        if not path.exists():
+            return probe_state != "unavailable"
+        try:
+            stat_result = path.stat()
+        except Exception:
+            return True
+        live_size = int(stat_result.st_size)
+        live_mtime_ns = int(getattr(stat_result, "st_mtime_ns", 0))
+        if _safe_int(payload.get("shadow_index_size_bytes"), 0) != live_size:
+            return True
+        if _safe_int(payload.get("shadow_index_mtime_ns"), 0) != live_mtime_ns:
+            return True
+        return probe_state != "available"
+
+    def _shadow_index_public_payload(
+        self, stats: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        payload = dict(stats or self._shadow_index_stats_cache)
+        payload["shadow_index_probe_age_secs"] = self._shadow_index_probe_age_secs(payload)
+        return payload
+
+    def _ensure_shadow_index_stats_cache_fresh_sync(
+        self, *, force: bool = False
+    ) -> dict[str, Any]:
+        if force or self._shadow_index_cache_should_refresh():
+            return self._refresh_shadow_index_stats_cache_sync()
+        return self._shadow_index_public_payload()
 
     def _persist_shadow_index_stats_cache(self) -> None:
         state = self._read_scheduler_state()
@@ -529,7 +602,7 @@ class PredictiveTrainerManager:
         stats = _read_shadow_sqlite_stats(self.config.shadow_sqlite_path)
         self._shadow_index_stats_cache = stats
         self._persist_shadow_index_stats_cache()
-        return dict(stats)
+        return self._shadow_index_public_payload(stats)
 
     async def _refresh_shadow_index_stats_cache(self) -> dict[str, Any]:
         return await self._run_sync_on_executor(self._refresh_shadow_index_stats_cache_sync)
@@ -981,11 +1054,17 @@ class PredictiveTrainerManager:
 
     def _scheduler_trigger_payload(self) -> dict[str, Any]:
         reconciliation = self._reconcile_run_state()
+        shadow_stats = self._ensure_shadow_index_stats_cache_fresh_sync()
         state = self._read_scheduler_state()
         active_model = self._active_artifacts()
         current_shadow_entry_count = _safe_int(
-            self._shadow_index_stats_cache.get("current_shadow_entry_count"), 0
+            shadow_stats.get("current_shadow_entry_count"), 0
         )
+        shadow_index_probe_state = (
+            str(shadow_stats.get("shadow_index_probe_state") or "").strip()
+            or "unavailable"
+        )
+        shadow_index_probe_available = shadow_index_probe_state == "available"
         active_model_raw_shadow_entry_count = _safe_int(
             active_model.get("raw_shadow_entry_count"), 0
         )
@@ -1026,6 +1105,8 @@ class PredictiveTrainerManager:
         should_start = False
         if self.is_running():
             reason = "already_running"
+        elif not shadow_index_probe_available:
+            reason = "shadow_index_unavailable"
         elif not corpus_advanced_beyond_active_model:
             reason = "current_corpus_already_modeled"
         elif row_threshold_reached:
@@ -1058,24 +1139,27 @@ class PredictiveTrainerManager:
             "last_requested_by": state.get("last_requested_by"),
             "last_trigger_reason": state.get("last_trigger_reason"),
             "shadow_index_count_cached": bool(
-                self._shadow_index_stats_cache.get("shadow_index_count_cached", True)
+                shadow_stats.get("shadow_index_count_cached", True)
             ),
-            "shadow_index_count_refreshed_at": self._shadow_index_stats_cache.get(
+            "shadow_index_count_refreshed_at": shadow_stats.get(
                 "shadow_index_count_refreshed_at"
             ),
-            "shadow_index_count_error": self._shadow_index_stats_cache.get(
+            "shadow_index_count_error": shadow_stats.get(
                 "shadow_index_count_error"
             ),
+            "shadow_index_probe_state": shadow_index_probe_state,
+            "shadow_index_probe_error": shadow_stats.get("shadow_index_probe_error"),
+            "shadow_index_probe_age_secs": shadow_stats.get("shadow_index_probe_age_secs"),
             "shadow_index_size_bytes": _safe_int(
-                self._shadow_index_stats_cache.get("shadow_index_size_bytes"), 0
+                shadow_stats.get("shadow_index_size_bytes"), 0
             ),
             "shadow_index_mtime_ns": _safe_int(
-                self._shadow_index_stats_cache.get("shadow_index_mtime_ns"), 0
+                shadow_stats.get("shadow_index_mtime_ns"), 0
             ),
             "shadow_index_last_seq": _safe_int(
-                self._shadow_index_stats_cache.get("shadow_index_last_seq"), 0
+                shadow_stats.get("shadow_index_last_seq"), 0
             ),
-            "shadow_index_last_write_at": self._shadow_index_stats_cache.get(
+            "shadow_index_last_write_at": shadow_stats.get(
                 "shadow_index_last_write_at"
             ),
         }
@@ -2034,6 +2118,9 @@ class PredictiveTrainerManager:
         latest_completed_promotion_state = (
             str(latest_completed_promotion.get("state") or "").strip() or None
         )
+        shadow_index_probe_state = (
+            str(trigger.get("shadow_index_probe_state") or "").strip() or "unavailable"
+        )
         pending_restart, effective_promotion_state = self._effective_restart_state(
             latest_completed_run_id=latest_completed_run_id,
             latest_completed_promotion_state=latest_completed_promotion_state,
@@ -2046,8 +2133,14 @@ class PredictiveTrainerManager:
             if active_model_raw_shadow_entry_count > 0
             else active_model_shadow_rows
         )
-        shadow_row_lag = max(0, current_shadow_entry_count - lag_baseline)
-        if active_model_raw_shadow_entry_count > 0 and shadow_row_lag <= 0:
+        shadow_row_lag = (
+            max(0, current_shadow_entry_count - lag_baseline)
+            if shadow_index_probe_state == "available"
+            else None
+        )
+        if shadow_index_probe_state != "available":
+            model_freshness_state = "shadow_index_unavailable"
+        elif active_model_raw_shadow_entry_count > 0 and (shadow_row_lag or 0) <= 0:
             model_freshness_state = "current"
         elif (
             latest_completed_run_status == "completed"
@@ -2066,7 +2159,11 @@ class PredictiveTrainerManager:
             "active_model_shadow_rows": active_model_shadow_rows,
             "active_model_raw_shadow_entry_count": active_model_raw_shadow_entry_count,
             "current_shadow_entry_count": current_shadow_entry_count,
-            "new_shadow_rows_since_trigger": new_shadow_rows_since_trigger,
+            "new_shadow_rows_since_trigger": (
+                new_shadow_rows_since_trigger
+                if shadow_index_probe_state == "available"
+                else None
+            ),
             "shadow_row_lag_vs_active_model": shadow_row_lag,
             "latest_completed_run_id": latest_completed_run_id,
             "latest_completed_run_status": latest_completed_run_status,
@@ -2076,6 +2173,9 @@ class PredictiveTrainerManager:
             "model_freshness_state": model_freshness_state,
             "pending_restart": pending_restart,
             "repo_state": repo_state,
+            "shadow_index_probe_state": shadow_index_probe_state,
+            "shadow_index_probe_error": trigger.get("shadow_index_probe_error"),
+            "shadow_index_probe_age_secs": trigger.get("shadow_index_probe_age_secs"),
         }
 
     def _scheduler_contract_payload(self) -> dict[str, Any]:

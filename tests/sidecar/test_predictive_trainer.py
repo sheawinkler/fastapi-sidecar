@@ -633,6 +633,48 @@ def test_health_payload_uses_cached_sqlite_stats_not_json_count(tmp_path: Path, 
     assert payload["scheduler_trigger"]["shadow_index_count_error"] is None
 
 
+def test_health_payload_refreshes_stale_cached_sqlite_missing_when_file_exists(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager._write_scheduler_state(
+        {
+            "current_shadow_entry_count": 0,
+            "shadow_index_size_bytes": 0,
+            "shadow_index_mtime_ns": 0,
+            "shadow_index_count_refreshed_at": "2026-04-07T00:00:00Z",
+            "shadow_index_count_error": "sqlite_missing",
+            "shadow_index_probe_state": "stale_cached",
+            "shadow_index_probe_error": "sqlite_missing",
+        }
+    )
+    manager._shadow_index_stats_cache = manager._bootstrap_shadow_index_stats_cache()
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 333)
+
+    payload = manager.health_payload()
+
+    assert payload["current_shadow_entry_count"] == 333
+    assert payload["shadow_index_probe_state"] == "available"
+    assert payload["shadow_index_probe_error"] is None
+    assert payload["scheduler_trigger"]["shadow_index_count_error"] is None
+
+
+def test_scheduler_trigger_reports_shadow_index_unavailable_without_fake_modeled_state(tmp_path: Path):
+    config = _make_config(tmp_path)
+    manager = PredictiveTrainerManager(config)
+    _write_active_training_artifact(config, raw_shadow_entry_count=200, shadow_rows=120, rows=125)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+
+    trigger = manager._scheduler_trigger_payload()
+    payload = manager.health_payload()
+
+    assert trigger["should_start"] is False
+    assert trigger["reason"] == "shadow_index_unavailable"
+    assert trigger["shadow_index_probe_state"] == "unavailable"
+    assert payload["model_freshness_state"] == "shadow_index_unavailable"
+    assert payload["shadow_index_probe_state"] == "unavailable"
+    assert payload["new_shadow_rows_since_trigger"] is None
+    assert payload["shadow_row_lag_vs_active_model"] is None
+
+
 def test_status_payload_reports_shadow_store_paths(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
 
@@ -644,6 +686,7 @@ def test_status_payload_reports_shadow_store_paths(tmp_path: Path):
     assert payload["shadow_index_path"] == str(manager.config.shadow_sqlite_path)
     assert payload["shadow_index_legacy_path"] == str(manager.config.shadow_index_path)
     assert payload["shadow_duckdb_path"] == str(manager.config.shadow_duckdb_path)
+    assert payload["shadow_index_probe_state"] in {"available", "unavailable", "stale_cached"}
 
 
 def test_status_payload_reports_active_run_stage_and_artifact_flags(tmp_path: Path):
