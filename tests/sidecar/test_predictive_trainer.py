@@ -13,9 +13,15 @@ import pytest
 import src.api.predictive_trainer as predictive_trainer
 from src.api.predictive_trainer import PredictiveTrainerConfig, PredictiveTrainerManager
 
+SHADOW_CORPUS_FAMILY_ID = "predictive_candidate_firehose:raw_shadow:v1"
+
 
 def _write_shadow_sqlite_count(
-    sqlite_path: Path, count: int, *, corpus_instance_id: str = "corpus-a"
+    sqlite_path: Path,
+    count: int,
+    *,
+    corpus_instance_id: str = "corpus-a",
+    corpus_family_id: str = SHADOW_CORPUS_FAMILY_ID,
 ) -> None:
     sqlite_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(sqlite_path))
@@ -28,17 +34,26 @@ def _write_shadow_sqlite_count(
             last_seq INTEGER NOT NULL DEFAULT 0,
             last_write_at TEXT,
             corpus_instance_id TEXT,
-            corpus_created_at TEXT
+            corpus_created_at TEXT,
+            corpus_family_id TEXT
         );
         """,
     )
     conn.execute(
         """
         INSERT OR REPLACE INTO predictive_candidate_firehose_shadow_outcomes_stats
-            (singleton, entry_count, last_seq, last_write_at, corpus_instance_id, corpus_created_at)
-        VALUES (1, ?, ?, '2026-04-07T00:00:00Z', ?, '2026-04-07T00:00:00Z')
+            (
+                singleton,
+                entry_count,
+                last_seq,
+                last_write_at,
+                corpus_instance_id,
+                corpus_created_at,
+                corpus_family_id
+            )
+        VALUES (1, ?, ?, '2026-04-07T00:00:00Z', ?, '2026-04-07T00:00:00Z', ?)
         """,
-        (count, count, corpus_instance_id),
+        (count, count, corpus_instance_id, corpus_family_id),
     )
     conn.commit()
     conn.close()
@@ -51,6 +66,7 @@ def _write_active_training_artifact(
     shadow_rows: int | None = None,
     rows: int | None = None,
     corpus_instance_id: str = "corpus-a",
+    corpus_family_id: str = SHADOW_CORPUS_FAMILY_ID,
 ) -> None:
     config.training_path.write_text(
         json.dumps(
@@ -60,6 +76,7 @@ def _write_active_training_artifact(
                     "shadow_rows": shadow_rows if shadow_rows is not None else raw_shadow_entry_count,
                     "raw_shadow_entry_count": raw_shadow_entry_count,
                     "shadow_corpus_instance_id": corpus_instance_id,
+                    "shadow_corpus_family_id": corpus_family_id,
                     "shadow_corpus_entry_count": raw_shadow_entry_count,
                     "shadow_corpus_last_seq": raw_shadow_entry_count,
                     "shadow_corpus_durability_state": "durable_local_only",
@@ -307,6 +324,8 @@ def test_build_attestation_carries_provenance_summary(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_start_run_prevents_overlap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 150)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -396,10 +415,16 @@ def test_active_artifacts_degrades_when_model_read_fails(tmp_path: Path, monkeyp
     assert "Resource deadlock avoided" in payload["model_read_error"]["message"]
 
 
-def test_scheduler_trigger_skips_auto_retrain_when_active_model_matches_current_corpus(tmp_path: Path):
+def test_scheduler_trigger_skips_auto_retrain_when_active_model_covers_current_same_family(tmp_path: Path):
     config = _make_config(tmp_path)
     manager = PredictiveTrainerManager(config)
-    _write_active_training_artifact(config, raw_shadow_entry_count=200, shadow_rows=120, rows=125)
+    _write_active_training_artifact(
+        config,
+        raw_shadow_entry_count=200,
+        shadow_rows=120,
+        rows=125,
+        corpus_instance_id="historical-corpus-a",
+    )
     manager._write_scheduler_state(
         {
             "last_run_id": "run-old",
@@ -409,17 +434,27 @@ def test_scheduler_trigger_skips_auto_retrain_when_active_model_matches_current_
             "last_trigger_shadow_entry_count": 150,
         }
     )
-    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 200)
+    _write_shadow_sqlite_count(
+        manager.config.shadow_sqlite_path,
+        200,
+        corpus_instance_id="recovered-corpus-b",
+    )
     manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
 
     trigger = manager._scheduler_trigger_payload()
 
     assert trigger["should_start"] is False
-    assert trigger["reason"] == "current_corpus_already_modeled"
+    assert trigger["reason"] == "active_model_superset_same_family"
     assert trigger["active_model_raw_shadow_entry_count"] == 200
     assert trigger["effective_trigger_shadow_entry_count"] == 200
     assert trigger["new_shadow_rows_since_effective_baseline"] == 0
     assert trigger["corpus_advanced_beyond_active_model"] is False
+    assert trigger["shadow_corpus_consistency_state"] == "recreated"
+    assert (
+        trigger["shadow_corpus_compatibility_state"]
+        == "compatible_same_family_active_superset"
+    )
+    assert trigger["shadow_corpus_integrity_reason"] is None
 
 
 def test_scheduler_trigger_uses_interval_when_active_model_lags_current_corpus(tmp_path: Path):
@@ -446,6 +481,36 @@ def test_scheduler_trigger_uses_interval_when_active_model_lags_current_corpus(t
     assert trigger["row_threshold_reached"] is False
     assert trigger["shadow_row_lag_vs_active_model"] == 30
     assert trigger["corpus_advanced_beyond_active_model"] is True
+    assert (
+        trigger["shadow_corpus_compatibility_state"]
+        == "compatible_same_family_current_superset"
+    )
+
+
+def test_scheduler_trigger_holds_only_on_incompatible_family(tmp_path: Path):
+    config = _make_config(tmp_path)
+    manager = PredictiveTrainerManager(config)
+    _write_active_training_artifact(
+        config,
+        raw_shadow_entry_count=170,
+        shadow_rows=110,
+        rows=115,
+        corpus_instance_id="historical-corpus-a",
+        corpus_family_id="predictive_candidate_firehose:raw_shadow:v2",
+    )
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 200)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+
+    trigger = manager._scheduler_trigger_payload()
+
+    assert trigger["should_start"] is False
+    assert trigger["reason"] == "shadow_corpus_integrity_hold"
+    assert trigger["shadow_corpus_consistency_state"] == "recreated"
+    assert trigger["shadow_corpus_compatibility_state"] == "incompatible_family"
+    assert (
+        trigger["shadow_corpus_integrity_reason"]
+        == "current_corpus_family_differs_from_active_model"
+    )
 
 
 def test_scheduler_trigger_uses_interval_when_row_threshold_not_met(tmp_path: Path):
@@ -635,6 +700,34 @@ def test_health_payload_reports_current_when_latest_run_gated_no_change(tmp_path
     assert payload["shadow_row_lag_vs_active_model"] == 60
 
 
+def test_health_payload_reports_current_for_same_family_active_superset(tmp_path: Path):
+    config = _make_config(tmp_path)
+    manager = PredictiveTrainerManager(config)
+    _write_active_training_artifact(
+        config,
+        raw_shadow_entry_count=31270,
+        shadow_rows=16016,
+        rows=16029,
+        corpus_instance_id="historical-shadow-31270",
+    )
+    _write_shadow_sqlite_count(
+        manager.config.shadow_sqlite_path,
+        15076,
+        corpus_instance_id="recovered-shadow-15076",
+    )
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+
+    payload = manager.health_payload()
+
+    assert payload["shadow_corpus_consistency_state"] == "recreated"
+    assert (
+        payload["shadow_corpus_compatibility_state"]
+        == "compatible_same_family_active_superset"
+    )
+    assert payload["shadow_corpus_integrity_reason"] is None
+    assert payload["model_freshness_state"] == "current"
+
+
 def test_health_payload_uses_cached_sqlite_stats_not_json_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 333)
@@ -811,6 +904,7 @@ async def test_start_run_seeds_manifest_before_background_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 150)
     manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
     gate = asyncio.Event()
 

@@ -24,6 +24,7 @@ PREDICTIVE_CANDIDATE_FIREHOSE_TABLE = "predictive_candidate_firehose_shadow_outc
 PREDICTIVE_CANDIDATE_FIREHOSE_STATS_TABLE = (
     "predictive_candidate_firehose_shadow_outcomes_stats"
 )
+SHADOW_CORPUS_FAMILY_ID = "predictive_candidate_firehose:raw_shadow:v1"
 
 
 def _utc_now() -> datetime:
@@ -47,6 +48,37 @@ def _safe_float(value: Any, default: float | None = None) -> float | None:
         return float(value)
     except Exception:
         return default
+
+
+def _resolved_shadow_corpus_family_id(value: Any, *, has_shadow_history: bool) -> str | None:
+    text = str(value or "").strip()
+    if text:
+        return text
+    if has_shadow_history:
+        return SHADOW_CORPUS_FAMILY_ID
+    return None
+
+
+def _shadow_corpus_covers_current(
+    *,
+    current_entry_count: int,
+    current_last_seq: int,
+    candidate_entry_count: int,
+    candidate_last_seq: int,
+) -> bool:
+    if current_entry_count <= 0 or candidate_entry_count <= 0:
+        return False
+    if current_last_seq > 0 and candidate_last_seq > 0:
+        return candidate_last_seq >= current_last_seq
+    return candidate_entry_count >= current_entry_count
+
+
+def _shadow_corpus_hold_required(corpus_state: dict[str, Any]) -> bool:
+    return str(corpus_state.get("shadow_corpus_compatibility_state") or "").strip() in {
+        "unavailable",
+        "unknown",
+        "incompatible_family",
+    }
 
 
 def _parse_utc_ts(raw: str | None) -> datetime | None:
@@ -159,6 +191,7 @@ def _default_shadow_index_stats_cache() -> dict[str, Any]:
         "shadow_index_probe_error": None,
         "shadow_corpus_instance_id": None,
         "shadow_corpus_created_at": None,
+        "shadow_corpus_family_id": None,
         "shadow_corpus_last_seq": 0,
     }
 
@@ -201,6 +234,8 @@ def _read_shadow_sqlite_stats(path: Path) -> dict[str, Any]:
             select_columns.append("corpus_instance_id")
         if "corpus_created_at" in stats_columns:
             select_columns.append("corpus_created_at")
+        if "corpus_family_id" in stats_columns:
+            select_columns.append("corpus_family_id")
         row = conn.execute(
             f"""
             SELECT {', '.join(select_columns)}
@@ -220,6 +255,13 @@ def _read_shadow_sqlite_stats(path: Path) -> dict[str, Any]:
                 idx += 1
             if "corpus_created_at" in stats_columns:
                 payload["shadow_corpus_created_at"] = row[idx]
+                idx += 1
+            if "corpus_family_id" in stats_columns:
+                payload["shadow_corpus_family_id"] = row[idx]
+            payload["shadow_corpus_family_id"] = _resolved_shadow_corpus_family_id(
+                payload.get("shadow_corpus_family_id"),
+                has_shadow_history=payload["current_shadow_entry_count"] > 0,
+            )
         payload["shadow_index_count_refreshed_at"] = _utc_iso()
         payload["shadow_index_count_error"] = None
         payload["shadow_index_probe_state"] = "available"
@@ -586,6 +628,13 @@ class PredictiveTrainerManager:
                     or payload.get("shadow_index_count_error"),
                     "shadow_corpus_instance_id": payload.get("shadow_corpus_instance_id"),
                     "shadow_corpus_created_at": payload.get("shadow_corpus_created_at"),
+                    "shadow_corpus_family_id": _resolved_shadow_corpus_family_id(
+                        payload.get("shadow_corpus_family_id"),
+                        has_shadow_history=_safe_int(
+                            payload.get("current_shadow_entry_count"), 0
+                        )
+                        > 0,
+                    ),
                     "shadow_corpus_last_seq": _safe_int(
                         payload.get("shadow_corpus_last_seq"), 0
                     ),
@@ -711,11 +760,22 @@ class PredictiveTrainerManager:
             str(stats.get("shadow_index_probe_state") or "").strip() or "unavailable"
         )
         current_instance_id = str(stats.get("shadow_corpus_instance_id") or "").strip()
+        current_family_id = _resolved_shadow_corpus_family_id(
+            stats.get("shadow_corpus_family_id"),
+            has_shadow_history=_safe_int(stats.get("current_shadow_entry_count"), 0) > 0,
+        )
         current_last_seq = _safe_int(
             stats.get("shadow_corpus_last_seq") or stats.get("shadow_index_last_seq"), 0
         )
         current_entry_count = _safe_int(stats.get("current_shadow_entry_count"), 0)
         active_instance_id = str(model.get("shadow_corpus_instance_id") or "").strip()
+        active_family_id = _resolved_shadow_corpus_family_id(
+            model.get("shadow_corpus_family_id"),
+            has_shadow_history=_safe_int(
+                model.get("shadow_corpus_entry_count") or model.get("raw_shadow_entry_count"), 0
+            )
+            > 0,
+        )
         active_last_seq = _safe_int(model.get("shadow_corpus_last_seq"), 0)
         active_entry_count = _safe_int(
             model.get("shadow_corpus_entry_count") or model.get("raw_shadow_entry_count"), 0
@@ -729,6 +789,15 @@ class PredictiveTrainerManager:
         latest_instance_id = str(
             latest_candidate.get("shadow_corpus_instance_id") or ""
         ).strip()
+        latest_family_id = _resolved_shadow_corpus_family_id(
+            latest_candidate.get("shadow_corpus_family_id"),
+            has_shadow_history=_safe_int(
+                latest_candidate.get("shadow_corpus_entry_count")
+                or latest_candidate.get("raw_shadow_entry_count"),
+                0,
+            )
+            > 0,
+        )
         latest_last_seq = _safe_int(latest_candidate.get("shadow_corpus_last_seq"), 0)
         latest_entry_count = _safe_int(
             latest_candidate.get("shadow_corpus_entry_count")
@@ -741,12 +810,6 @@ class PredictiveTrainerManager:
         if current_probe_state != "available":
             consistency_state = "unavailable"
             integrity_reason = "shadow_index_unavailable"
-        elif current_entry_count > 0 and not current_instance_id:
-            consistency_state = "unknown"
-            integrity_reason = "current_corpus_identity_missing"
-        elif active_entry_count > 0 and not active_instance_id:
-            consistency_state = "unknown"
-            integrity_reason = "active_model_corpus_identity_unknown"
         elif current_instance_id and active_instance_id and current_instance_id != active_instance_id:
             consistency_state = "recreated"
             integrity_reason = "current_corpus_differs_from_active_model"
@@ -761,17 +824,67 @@ class PredictiveTrainerManager:
             consistency_state = "unknown"
             integrity_reason = "coverage_identity_unproven"
 
+        compatibility_state = "unknown"
+        compatibility_reason = "coverage_family_unproven"
+        if current_probe_state != "available":
+            compatibility_state = "unavailable"
+            compatibility_reason = "shadow_index_unavailable"
+        elif current_entry_count > 0 and not current_family_id:
+            compatibility_state = "unknown"
+            compatibility_reason = "current_corpus_family_unknown"
+        elif active_entry_count > 0 and not active_family_id:
+            compatibility_state = "unknown"
+            compatibility_reason = "active_model_family_unknown"
+        elif current_entry_count <= 0:
+            compatibility_state = "unknown"
+            compatibility_reason = "current_corpus_empty"
+        elif active_entry_count <= 0:
+            compatibility_state = "compatible_same_family_current_superset"
+            compatibility_reason = "active_model_missing_current_same_family"
+        elif current_family_id != active_family_id:
+            compatibility_state = "incompatible_family"
+            compatibility_reason = "current_corpus_family_differs_from_active_model"
+        elif _shadow_corpus_covers_current(
+            current_entry_count=current_entry_count,
+            current_last_seq=current_last_seq,
+            candidate_entry_count=active_entry_count,
+            candidate_last_seq=active_last_seq,
+        ):
+            if (
+                current_instance_id
+                and active_instance_id
+                and current_instance_id == active_instance_id
+            ):
+                compatibility_state = "compatible_same_instance"
+                compatibility_reason = "current_corpus_matches_active_model_instance"
+            else:
+                compatibility_state = "compatible_same_family_active_superset"
+                compatibility_reason = "active_model_same_family_superset"
+        else:
+            compatibility_state = "compatible_same_family_current_superset"
+            compatibility_reason = "current_corpus_newer_same_family"
+
+        if compatibility_state in {"compatible_same_instance", "compatible_same_family_active_superset", "compatible_same_family_current_superset"}:
+            integrity_reason = None
+        elif compatibility_state in {"unavailable", "unknown", "incompatible_family"}:
+            integrity_reason = compatibility_reason
+
         return {
             "shadow_corpus_instance_id": current_instance_id or None,
             "shadow_corpus_created_at": stats.get("shadow_corpus_created_at"),
+            "shadow_corpus_family_id": current_family_id,
             "shadow_corpus_entry_count": current_entry_count,
             "shadow_corpus_last_seq": current_last_seq,
             "shadow_corpus_consistency_state": consistency_state,
             "shadow_corpus_integrity_reason": integrity_reason,
+            "shadow_corpus_compatibility_state": compatibility_state,
+            "shadow_corpus_compatibility_reason": compatibility_reason,
             "shadow_corpus_durability_state": self._shadow_corpus_durability_state(stats),
             "active_model_shadow_corpus_instance_id": active_instance_id or None,
+            "active_model_shadow_corpus_family_id": active_family_id,
             "active_model_shadow_corpus_last_seq": active_last_seq,
             "latest_completed_run_shadow_corpus_instance_id": latest_instance_id or None,
+            "latest_completed_run_shadow_corpus_family_id": latest_family_id,
             "latest_completed_run_shadow_corpus_last_seq": latest_last_seq,
         }
 
@@ -1096,6 +1209,9 @@ class PredictiveTrainerManager:
             "shadow_corpus_created_at": self._shadow_index_stats_cache.get(
                 "shadow_corpus_created_at"
             ),
+            "shadow_corpus_family_id": self._shadow_index_stats_cache.get(
+                "shadow_corpus_family_id"
+            ),
             "shadow_corpus_last_seq": _safe_int(
                 self._shadow_index_stats_cache.get("shadow_corpus_last_seq"), 0
             ),
@@ -1342,19 +1458,14 @@ class PredictiveTrainerManager:
         shadow_row_lag_vs_active_model = max(
             0, current_shadow_entry_count - active_model_raw_shadow_entry_count
         )
-        same_corpus_as_active_model = (
-            str(corpus_state.get("shadow_corpus_instance_id") or "").strip()
-            and str(corpus_state.get("shadow_corpus_instance_id") or "").strip()
-            == str(corpus_state.get("active_model_shadow_corpus_instance_id") or "").strip()
-        )
-        corpus_advanced_beyond_active_model = (
-            same_corpus_as_active_model
-            and current_shadow_corpus_last_seq > active_model_shadow_corpus_last_seq
-        ) or (
-            active_model_raw_shadow_entry_count <= 0
-            and current_shadow_entry_count > 0
-            and str(corpus_state.get("shadow_corpus_consistency_state") or "") == "consistent"
-        )
+        compatibility_state = str(
+            corpus_state.get("shadow_corpus_compatibility_state") or ""
+        ).strip()
+        active_model_covers_current_same_family = compatibility_state in {
+            "compatible_same_instance",
+            "compatible_same_family_active_superset",
+        }
+        corpus_advanced_beyond_active_model = compatibility_state == "compatible_same_family_current_superset"
         last_run_started_at = str(state.get("last_run_started_at") or "").strip() or None
         last_started_dt = _parse_utc_ts(last_run_started_at)
         seconds_since_last_run_started: float | None = None
@@ -1376,10 +1487,10 @@ class PredictiveTrainerManager:
             reason = "already_running"
         elif not shadow_index_probe_available:
             reason = "shadow_index_unavailable"
-        elif str(corpus_state.get("shadow_corpus_consistency_state") or "") != "consistent":
+        elif _shadow_corpus_hold_required(corpus_state):
             reason = "shadow_corpus_integrity_hold"
-        elif not corpus_advanced_beyond_active_model:
-            reason = "current_corpus_already_modeled"
+        elif active_model_covers_current_same_family:
+            reason = "active_model_superset_same_family"
         elif row_threshold_reached:
             reason = "row_threshold"
             requested_by = "scheduler_row_threshold"
@@ -1388,6 +1499,8 @@ class PredictiveTrainerManager:
             reason = "interval"
             requested_by = "scheduler_interval"
             should_start = True
+        elif compatibility_state == "compatible_same_family_current_superset":
+            reason = "current_corpus_newer_same_family"
         return {
             "should_start": should_start,
             "requested_by": requested_by,
@@ -1402,6 +1515,7 @@ class PredictiveTrainerManager:
             "new_shadow_rows_since_effective_baseline": new_shadow_rows_since_effective_baseline,
             "shadow_row_lag_vs_active_model": shadow_row_lag_vs_active_model,
             "corpus_advanced_beyond_active_model": corpus_advanced_beyond_active_model,
+            "active_model_covers_current_same_family": active_model_covers_current_same_family,
             "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
             "interval_elapsed": interval_elapsed,
             "row_threshold_reached": row_threshold_reached,
@@ -1447,6 +1561,7 @@ class PredictiveTrainerManager:
                 "last_trigger_shadow_entry_count": trigger.get("current_shadow_entry_count"),
                 "shadow_corpus_instance_id": trigger.get("shadow_corpus_instance_id"),
                 "shadow_corpus_created_at": trigger.get("shadow_corpus_created_at"),
+                "shadow_corpus_family_id": trigger.get("shadow_corpus_family_id"),
                 "shadow_corpus_last_seq": trigger.get("shadow_corpus_last_seq"),
             }
         )
@@ -1598,6 +1713,16 @@ class PredictiveTrainerManager:
             or training_section.get("shadow_corpus_instance_id"),
             "shadow_corpus_created_at": model.get("shadow_corpus_created_at")
             or training_section.get("shadow_corpus_created_at"),
+            "shadow_corpus_family_id": _resolved_shadow_corpus_family_id(
+                model.get("shadow_corpus_family_id")
+                or training_section.get("shadow_corpus_family_id"),
+                has_shadow_history=_safe_int(
+                    model.get("raw_shadow_entry_count")
+                    or training_section.get("raw_shadow_entry_count"),
+                    0,
+                )
+                > 0,
+            ),
             "shadow_corpus_entry_count": _safe_int(
                 model.get("shadow_corpus_entry_count")
                 or training_section.get("shadow_corpus_entry_count"),
@@ -1768,6 +1893,10 @@ class PredictiveTrainerManager:
                 ),
                 "shadow_corpus_instance_id": model.get("shadow_corpus_instance_id"),
                 "shadow_corpus_created_at": model.get("shadow_corpus_created_at"),
+                "shadow_corpus_family_id": _resolved_shadow_corpus_family_id(
+                    model.get("shadow_corpus_family_id"),
+                    has_shadow_history=_safe_int(model.get("raw_shadow_entry_count"), 0) > 0,
+                ),
                 "shadow_corpus_entry_count": _safe_int(
                     model.get("shadow_corpus_entry_count"),
                     _safe_int(model.get("raw_shadow_entry_count"), 0),
@@ -1897,7 +2026,7 @@ class PredictiveTrainerManager:
         async with self._lock:
             self._reconcile_run_state()
             trigger = self._scheduler_trigger_payload()
-            if str(trigger.get("reason") or "").strip() == "shadow_corpus_integrity_hold":
+            if _shadow_corpus_hold_required(trigger):
                 return {
                     "status": "integrity_hold",
                     "reason": trigger.get("shadow_corpus_integrity_reason"),
@@ -2200,6 +2329,9 @@ class PredictiveTrainerManager:
                 "shadow_corpus_created_at": candidate_attestation.get("training", {}).get(
                     "shadow_corpus_created_at"
                 ),
+                "shadow_corpus_family_id": candidate_attestation.get("training", {}).get(
+                    "shadow_corpus_family_id"
+                ),
                 "shadow_corpus_entry_count": _safe_int(
                     candidate_attestation.get("training", {}).get(
                         "shadow_corpus_entry_count"
@@ -2236,6 +2368,9 @@ class PredictiveTrainerManager:
             )
             manifest["shadow_corpus_created_at"] = manifest["candidate_model"].get(
                 "shadow_corpus_created_at"
+            )
+            manifest["shadow_corpus_family_id"] = manifest["candidate_model"].get(
+                "shadow_corpus_family_id"
             )
             manifest["shadow_corpus_last_seq"] = manifest["candidate_model"].get(
                 "shadow_corpus_last_seq"
@@ -2426,7 +2561,7 @@ class PredictiveTrainerManager:
 
     async def promote_run(self, run_id: str, *, forced: bool = True) -> dict[str, Any]:
         corpus_state = self._shadow_corpus_consistency_payload()
-        if str(corpus_state.get("shadow_corpus_consistency_state") or "") != "consistent":
+        if _shadow_corpus_hold_required(corpus_state):
             raise RuntimeError(
                 f"shadow_corpus_integrity_hold:{corpus_state.get('shadow_corpus_integrity_reason')}"
             )
@@ -2512,15 +2647,42 @@ class PredictiveTrainerManager:
             if shadow_index_probe_state == "available"
             else None
         )
+        compatibility_state = str(
+            corpus_state.get("shadow_corpus_compatibility_state") or ""
+        ).strip()
+        latest_completed_run_shadow_corpus_family_id = _resolved_shadow_corpus_family_id(
+            latest_manifest.get("shadow_corpus_family_id")
+            or (latest_manifest.get("candidate_model") or {}).get("shadow_corpus_family_id"),
+            has_shadow_history=latest_completed_run_raw_shadow_entry_count > 0,
+        )
+        current_shadow_corpus_family_id = _resolved_shadow_corpus_family_id(
+            trigger.get("shadow_corpus_family_id"),
+            has_shadow_history=current_shadow_entry_count > 0,
+        )
+        latest_completed_run_covers_current_same_family = (
+            latest_completed_run_status == "completed"
+            and latest_completed_run_raw_shadow_entry_count > 0
+            and current_shadow_entry_count > 0
+            and current_shadow_corpus_family_id
+            and current_shadow_corpus_family_id == latest_completed_run_shadow_corpus_family_id
+            and _shadow_corpus_covers_current(
+                current_entry_count=current_shadow_entry_count,
+                current_last_seq=_safe_int(trigger.get("shadow_corpus_last_seq"), 0),
+                candidate_entry_count=latest_completed_run_raw_shadow_entry_count,
+                candidate_last_seq=_safe_int(latest_manifest.get("shadow_corpus_last_seq"), 0),
+            )
+        )
         if shadow_index_probe_state != "available":
             model_freshness_state = "shadow_index_unavailable"
-        elif str(corpus_state.get("shadow_corpus_consistency_state") or "") != "consistent":
+        elif _shadow_corpus_hold_required(corpus_state):
             model_freshness_state = "shadow_corpus_integrity_hold"
-        elif active_model_raw_shadow_entry_count > 0 and (shadow_row_lag or 0) <= 0:
+        elif compatibility_state in {
+            "compatible_same_instance",
+            "compatible_same_family_active_superset",
+        }:
             model_freshness_state = "current"
         elif (
-            latest_completed_run_status == "completed"
-            and latest_completed_run_raw_shadow_entry_count >= current_shadow_entry_count
+            latest_completed_run_covers_current_same_family
             and latest_completed_promotion_state == "gated_off"
         ):
             model_freshness_state = "current_gated_no_change"
