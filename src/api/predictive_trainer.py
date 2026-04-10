@@ -157,6 +157,9 @@ def _default_shadow_index_stats_cache() -> dict[str, Any]:
         "shadow_index_last_write_at": None,
         "shadow_index_probe_state": "unavailable",
         "shadow_index_probe_error": None,
+        "shadow_corpus_instance_id": None,
+        "shadow_corpus_created_at": None,
+        "shadow_corpus_last_seq": 0,
     }
 
 
@@ -187,9 +190,20 @@ def _read_shadow_sqlite_stats(path: Path) -> dict[str, Any]:
             payload["shadow_index_probe_error"] = "sqlite_stats_table_missing"
             payload["shadow_index_count_refreshed_at"] = _utc_iso()
             return payload
+        stats_columns = {
+            str(row[1])
+            for row in conn.execute(
+                f"PRAGMA table_info({PREDICTIVE_CANDIDATE_FIREHOSE_STATS_TABLE})"
+            ).fetchall()
+        }
+        select_columns = ["entry_count", "last_seq", "last_write_at"]
+        if "corpus_instance_id" in stats_columns:
+            select_columns.append("corpus_instance_id")
+        if "corpus_created_at" in stats_columns:
+            select_columns.append("corpus_created_at")
         row = conn.execute(
             f"""
-            SELECT entry_count, last_seq, last_write_at
+            SELECT {', '.join(select_columns)}
             FROM {PREDICTIVE_CANDIDATE_FIREHOSE_STATS_TABLE}
             WHERE singleton = 1
             """
@@ -199,6 +213,13 @@ def _read_shadow_sqlite_stats(path: Path) -> dict[str, Any]:
             payload["current_shadow_entry_count"] = _safe_int(row[0], 0)
             payload["shadow_index_last_seq"] = _safe_int(row[1], 0)
             payload["shadow_index_last_write_at"] = row[2]
+            payload["shadow_corpus_last_seq"] = _safe_int(row[1], 0)
+            idx = 3
+            if "corpus_instance_id" in stats_columns:
+                payload["shadow_corpus_instance_id"] = row[idx]
+                idx += 1
+            if "corpus_created_at" in stats_columns:
+                payload["shadow_corpus_created_at"] = row[idx]
         payload["shadow_index_count_refreshed_at"] = _utc_iso()
         payload["shadow_index_count_error"] = None
         payload["shadow_index_probe_state"] = "available"
@@ -256,6 +277,35 @@ def _load_history(path: Path, limit: int = 25) -> list[dict[str, Any]]:
         if isinstance(payload, dict):
             rows.append(payload)
     return rows[-limit:]
+
+
+def _read_archive_manifests(archive_root: Path) -> list[dict[str, Any]]:
+    manifests: list[dict[str, Any]] = []
+    if not archive_root.exists():
+        return manifests
+    for manifest_path in sorted(archive_root.glob("*/manifest.json")):
+        payload = None
+        try:
+            payload = _read_json(manifest_path)
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            continue
+        item = dict(payload)
+        item["manifest_path"] = str(manifest_path)
+        manifests.append(item)
+    manifests.sort(
+        key=lambda payload: str(
+            payload.get("archive_created_at") or payload.get("archive_id") or ""
+        ),
+        reverse=True,
+    )
+    return manifests
+
+
+def _latest_archive_manifest(archive_root: Path) -> dict[str, Any] | None:
+    manifests = _read_archive_manifests(archive_root)
+    return manifests[0] if manifests else None
 
 
 @dataclass(frozen=True)
@@ -327,6 +377,14 @@ class PredictiveTrainerConfig:
     @property
     def shadow_duckdb_path(self) -> Path:
         return self.algo_repo_dir / "logs/index/predictive_candidate_firehose_shadow_outcomes.duckdb"
+
+    @property
+    def shadow_archive_root(self) -> Path:
+        return self.algo_repo_dir.parent / "algotraderv2_rust_data_archives"
+
+    @property
+    def archive_shadow_script_path(self) -> Path:
+        return self.algo_repo_dir / "scripts/archive_predictive_shadow_corpus.py"
 
     @property
     def run_context_dir(self) -> Path:
@@ -526,6 +584,11 @@ class PredictiveTrainerManager:
                     or "stale_cached",
                     "shadow_index_probe_error": payload.get("shadow_index_probe_error")
                     or payload.get("shadow_index_count_error"),
+                    "shadow_corpus_instance_id": payload.get("shadow_corpus_instance_id"),
+                    "shadow_corpus_created_at": payload.get("shadow_corpus_created_at"),
+                    "shadow_corpus_last_seq": _safe_int(
+                        payload.get("shadow_corpus_last_seq"), 0
+                    ),
                 }
                 if cached["shadow_index_count_refreshed_at"] is not None or cached[
                     "current_shadow_entry_count"
@@ -591,7 +654,9 @@ class PredictiveTrainerManager:
     ) -> dict[str, Any]:
         if force or self._shadow_index_cache_should_refresh():
             return self._refresh_shadow_index_stats_cache_sync()
-        return self._shadow_index_public_payload()
+        payload = self._shadow_index_public_payload()
+        payload["shadow_index_count_cached"] = True
+        return payload
 
     def _persist_shadow_index_stats_cache(self) -> None:
         state = self._read_scheduler_state()
@@ -607,15 +672,187 @@ class PredictiveTrainerManager:
     async def _refresh_shadow_index_stats_cache(self) -> dict[str, Any]:
         return await self._run_sync_on_executor(self._refresh_shadow_index_stats_cache_sync)
 
+    def _shadow_archive_manifest(self) -> dict[str, Any] | None:
+        return _latest_archive_manifest(self.config.shadow_archive_root)
+
+    def _shadow_corpus_durability_state(
+        self, shadow_stats: dict[str, Any] | None = None
+    ) -> str:
+        stats = shadow_stats or self._shadow_index_stats_cache
+        current_instance_id = str(stats.get("shadow_corpus_instance_id") or "").strip()
+        current_entry_count = _safe_int(stats.get("current_shadow_entry_count"), 0)
+        if not current_instance_id or current_entry_count <= 0:
+            return "unprotected"
+        latest_archive = self._shadow_archive_manifest()
+        if not latest_archive:
+            return "unprotected"
+        if (
+            str(latest_archive.get("shadow_corpus_instance_id") or "").strip()
+            == current_instance_id
+            and _safe_int(latest_archive.get("shadow_corpus_entry_count"), 0)
+            >= current_entry_count
+        ):
+            return str(
+                latest_archive.get("shadow_corpus_durability_state")
+                or "durable_local_only"
+            )
+        return "unprotected"
+
+    def _shadow_corpus_consistency_payload(
+        self,
+        *,
+        shadow_stats: dict[str, Any] | None = None,
+        active_model: dict[str, Any] | None = None,
+        latest_completed_manifest: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        stats = dict(shadow_stats or self._ensure_shadow_index_stats_cache_fresh_sync())
+        model = dict(active_model or self._active_artifacts())
+        current_probe_state = (
+            str(stats.get("shadow_index_probe_state") or "").strip() or "unavailable"
+        )
+        current_instance_id = str(stats.get("shadow_corpus_instance_id") or "").strip()
+        current_last_seq = _safe_int(
+            stats.get("shadow_corpus_last_seq") or stats.get("shadow_index_last_seq"), 0
+        )
+        current_entry_count = _safe_int(stats.get("current_shadow_entry_count"), 0)
+        active_instance_id = str(model.get("shadow_corpus_instance_id") or "").strip()
+        active_last_seq = _safe_int(model.get("shadow_corpus_last_seq"), 0)
+        active_entry_count = _safe_int(
+            model.get("shadow_corpus_entry_count") or model.get("raw_shadow_entry_count"), 0
+        )
+        latest_manifest = latest_completed_manifest or self._latest_manifest_summary(
+            status="completed"
+        )
+        latest_candidate = (
+            dict((latest_manifest or {}).get("candidate_model") or {}) if latest_manifest else {}
+        )
+        latest_instance_id = str(
+            latest_candidate.get("shadow_corpus_instance_id") or ""
+        ).strip()
+        latest_last_seq = _safe_int(latest_candidate.get("shadow_corpus_last_seq"), 0)
+        latest_entry_count = _safe_int(
+            latest_candidate.get("shadow_corpus_entry_count")
+            or latest_candidate.get("raw_shadow_entry_count"),
+            0,
+        )
+
+        consistency_state = "consistent"
+        integrity_reason = None
+        if current_probe_state != "available":
+            consistency_state = "unavailable"
+            integrity_reason = "shadow_index_unavailable"
+        elif current_entry_count > 0 and not current_instance_id:
+            consistency_state = "unknown"
+            integrity_reason = "current_corpus_identity_missing"
+        elif active_entry_count > 0 and not active_instance_id:
+            consistency_state = "unknown"
+            integrity_reason = "active_model_corpus_identity_unknown"
+        elif current_instance_id and active_instance_id and current_instance_id != active_instance_id:
+            consistency_state = "recreated"
+            integrity_reason = "current_corpus_differs_from_active_model"
+        elif latest_entry_count > 0 and latest_instance_id and current_instance_id and latest_instance_id != current_instance_id:
+            consistency_state = "recreated"
+            integrity_reason = "current_corpus_differs_from_latest_completed_run"
+        elif current_instance_id and active_instance_id and current_instance_id == active_instance_id:
+            consistency_state = "consistent"
+        elif current_instance_id and latest_instance_id and current_instance_id == latest_instance_id:
+            consistency_state = "consistent"
+        elif current_entry_count > 0 and (active_entry_count > 0 or latest_entry_count > 0):
+            consistency_state = "unknown"
+            integrity_reason = "coverage_identity_unproven"
+
+        return {
+            "shadow_corpus_instance_id": current_instance_id or None,
+            "shadow_corpus_created_at": stats.get("shadow_corpus_created_at"),
+            "shadow_corpus_entry_count": current_entry_count,
+            "shadow_corpus_last_seq": current_last_seq,
+            "shadow_corpus_consistency_state": consistency_state,
+            "shadow_corpus_integrity_reason": integrity_reason,
+            "shadow_corpus_durability_state": self._shadow_corpus_durability_state(stats),
+            "active_model_shadow_corpus_instance_id": active_instance_id or None,
+            "active_model_shadow_corpus_last_seq": active_last_seq,
+            "latest_completed_run_shadow_corpus_instance_id": latest_instance_id or None,
+            "latest_completed_run_shadow_corpus_last_seq": latest_last_seq,
+        }
+
+    def _archive_shadow_corpus_sync(self) -> dict[str, Any]:
+        if not self.config.archive_shadow_script_path.exists():
+            return {"ok": False, "reason": "archive_script_missing"}
+        result = subprocess.run(
+            [
+                self.config.python_bin,
+                str(self.config.archive_shadow_script_path),
+                "--sqlite",
+                str(self.config.shadow_sqlite_path),
+                "--archive-root",
+                str(self.config.shadow_archive_root),
+            ],
+            cwd=self.config.algo_repo_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return {
+                "ok": False,
+                "reason": "archive_command_failed",
+                "returncode": result.returncode,
+                "stdout": result.stdout.strip(),
+                "stderr": result.stderr.strip(),
+            }
+        try:
+            payload = json.loads(result.stdout.strip() or "{}")
+        except Exception:
+            payload = {"ok": False, "reason": "archive_invalid_json", "stdout": result.stdout.strip()}
+        return payload if isinstance(payload, dict) else {"ok": False, "reason": "archive_invalid_payload"}
+
+    def _maybe_archive_shadow_corpus_sync(self, *, force: bool = False) -> dict[str, Any] | None:
+        shadow_stats = self._ensure_shadow_index_stats_cache_fresh_sync(force=force)
+        current_entry_count = _safe_int(shadow_stats.get("current_shadow_entry_count"), 0)
+        current_instance_id = str(shadow_stats.get("shadow_corpus_instance_id") or "").strip()
+        if current_entry_count <= 0 or not current_instance_id:
+            return None
+        latest_archive = self._shadow_archive_manifest()
+        latest_archive_count = _safe_int(
+            (latest_archive or {}).get("shadow_corpus_entry_count"), 0
+        )
+        latest_archive_instance = str(
+            (latest_archive or {}).get("shadow_corpus_instance_id") or ""
+        ).strip()
+        should_archive = force
+        if latest_archive is None:
+            should_archive = True
+        elif latest_archive_instance != current_instance_id:
+            should_archive = True
+        elif current_entry_count >= latest_archive_count + 5000:
+            should_archive = True
+        if not should_archive:
+            return None
+        result = self._archive_shadow_corpus_sync()
+        self._append_history(
+            {
+                "timestamp": _utc_iso(),
+                "event": "shadow_corpus_archived" if result.get("ok") else "shadow_corpus_archive_failed",
+                "shadow_corpus_entry_count": current_entry_count,
+                "result": result,
+            }
+        )
+        return result
+
     async def start(self) -> None:
         if not self.config.scheduler_enabled:
             return
         if self._scheduler_task and not self._scheduler_task.done():
             return
         await self._refresh_shadow_index_stats_cache()
+        await self._run_sync_on_executor(self._maybe_archive_shadow_corpus_sync)
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
 
     async def shutdown(self) -> None:
+        with contextlib.suppress(Exception):
+            await self._run_sync_on_executor(
+                self._maybe_archive_shadow_corpus_sync, force=True
+            )
         if self._scheduler_task:
             self._scheduler_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -667,6 +904,7 @@ class PredictiveTrainerManager:
         while True:
             try:
                 await self._refresh_shadow_index_stats_cache()
+                await self._run_sync_on_executor(self._maybe_archive_shadow_corpus_sync)
                 trigger = self._scheduler_trigger_payload()
                 if trigger.get("should_start"):
                     await self.start_run(
@@ -851,6 +1089,15 @@ class PredictiveTrainerManager:
             },
             "raw_shadow_entry_count": _safe_int(
                 self._shadow_index_stats_cache.get("current_shadow_entry_count"), 0
+            ),
+            "shadow_corpus_instance_id": self._shadow_index_stats_cache.get(
+                "shadow_corpus_instance_id"
+            ),
+            "shadow_corpus_created_at": self._shadow_index_stats_cache.get(
+                "shadow_corpus_created_at"
+            ),
+            "shadow_corpus_last_seq": _safe_int(
+                self._shadow_index_stats_cache.get("shadow_corpus_last_seq"), 0
             ),
             "active_model": self._active_artifacts(),
         }
@@ -1057,8 +1304,17 @@ class PredictiveTrainerManager:
         shadow_stats = self._ensure_shadow_index_stats_cache_fresh_sync()
         state = self._read_scheduler_state()
         active_model = self._active_artifacts()
+        corpus_state = self._shadow_corpus_consistency_payload(
+            shadow_stats=shadow_stats,
+            active_model=active_model,
+        )
         current_shadow_entry_count = _safe_int(
             shadow_stats.get("current_shadow_entry_count"), 0
+        )
+        current_shadow_corpus_last_seq = _safe_int(
+            shadow_stats.get("shadow_corpus_last_seq")
+            or shadow_stats.get("shadow_index_last_seq"),
+            0,
         )
         shadow_index_probe_state = (
             str(shadow_stats.get("shadow_index_probe_state") or "").strip()
@@ -1067,6 +1323,9 @@ class PredictiveTrainerManager:
         shadow_index_probe_available = shadow_index_probe_state == "available"
         active_model_raw_shadow_entry_count = _safe_int(
             active_model.get("raw_shadow_entry_count"), 0
+        )
+        active_model_shadow_corpus_last_seq = _safe_int(
+            active_model.get("shadow_corpus_last_seq"), 0
         )
         last_trigger_shadow_entry_count = _safe_int(
             state.get("last_trigger_shadow_entry_count"), current_shadow_entry_count
@@ -1083,9 +1342,19 @@ class PredictiveTrainerManager:
         shadow_row_lag_vs_active_model = max(
             0, current_shadow_entry_count - active_model_raw_shadow_entry_count
         )
+        same_corpus_as_active_model = (
+            str(corpus_state.get("shadow_corpus_instance_id") or "").strip()
+            and str(corpus_state.get("shadow_corpus_instance_id") or "").strip()
+            == str(corpus_state.get("active_model_shadow_corpus_instance_id") or "").strip()
+        )
         corpus_advanced_beyond_active_model = (
-            active_model_raw_shadow_entry_count <= 0 and current_shadow_entry_count > 0
-        ) or shadow_row_lag_vs_active_model > 0
+            same_corpus_as_active_model
+            and current_shadow_corpus_last_seq > active_model_shadow_corpus_last_seq
+        ) or (
+            active_model_raw_shadow_entry_count <= 0
+            and current_shadow_entry_count > 0
+            and str(corpus_state.get("shadow_corpus_consistency_state") or "") == "consistent"
+        )
         last_run_started_at = str(state.get("last_run_started_at") or "").strip() or None
         last_started_dt = _parse_utc_ts(last_run_started_at)
         seconds_since_last_run_started: float | None = None
@@ -1107,6 +1376,8 @@ class PredictiveTrainerManager:
             reason = "already_running"
         elif not shadow_index_probe_available:
             reason = "shadow_index_unavailable"
+        elif str(corpus_state.get("shadow_corpus_consistency_state") or "") != "consistent":
+            reason = "shadow_corpus_integrity_hold"
         elif not corpus_advanced_beyond_active_model:
             reason = "current_corpus_already_modeled"
         elif row_threshold_reached:
@@ -1162,6 +1433,7 @@ class PredictiveTrainerManager:
             "shadow_index_last_write_at": shadow_stats.get(
                 "shadow_index_last_write_at"
             ),
+            **corpus_state,
         }
 
     def _mark_scheduler_trigger(self, *, run_id: str, requested_by: str) -> None:
@@ -1173,6 +1445,9 @@ class PredictiveTrainerManager:
                 "last_run_started_at": _utc_iso(),
                 "last_trigger_reason": requested_by,
                 "last_trigger_shadow_entry_count": trigger.get("current_shadow_entry_count"),
+                "shadow_corpus_instance_id": trigger.get("shadow_corpus_instance_id"),
+                "shadow_corpus_created_at": trigger.get("shadow_corpus_created_at"),
+                "shadow_corpus_last_seq": trigger.get("shadow_corpus_last_seq"),
             }
         )
 
@@ -1319,6 +1594,29 @@ class PredictiveTrainerManager:
                 model.get("selected_total_training_rows"),
                 _safe_int(training_section.get("rows"), 0),
             ),
+            "shadow_corpus_instance_id": model.get("shadow_corpus_instance_id")
+            or training_section.get("shadow_corpus_instance_id"),
+            "shadow_corpus_created_at": model.get("shadow_corpus_created_at")
+            or training_section.get("shadow_corpus_created_at"),
+            "shadow_corpus_entry_count": _safe_int(
+                model.get("shadow_corpus_entry_count")
+                or training_section.get("shadow_corpus_entry_count"),
+                _safe_int(training_section.get("raw_shadow_entry_count"), 0),
+            ),
+            "shadow_corpus_last_seq": _safe_int(
+                model.get("shadow_corpus_last_seq")
+                or training_section.get("shadow_corpus_last_seq"),
+                0,
+            ),
+            "shadow_corpus_snapshot_sha256": model.get(
+                "shadow_corpus_snapshot_sha256"
+            )
+            or training_section.get("shadow_corpus_snapshot_sha256"),
+            "shadow_corpus_durability_state": model.get(
+                "shadow_corpus_durability_state"
+            )
+            or training_section.get("shadow_corpus_durability_state")
+            or "unprotected",
             "version": training_section.get("version") or model.get("version"),
             "calibration_global_mae_sol": _safe_float(
                 model.get("calibration", {}).get("global_mae_sol")
@@ -1468,6 +1766,22 @@ class PredictiveTrainerManager:
                     model.get("raw_shadow_entry_count"),
                     _safe_int(self._shadow_index_stats_cache.get("current_shadow_entry_count"), 0),
                 ),
+                "shadow_corpus_instance_id": model.get("shadow_corpus_instance_id"),
+                "shadow_corpus_created_at": model.get("shadow_corpus_created_at"),
+                "shadow_corpus_entry_count": _safe_int(
+                    model.get("shadow_corpus_entry_count"),
+                    _safe_int(model.get("raw_shadow_entry_count"), 0),
+                ),
+                "shadow_corpus_last_seq": _safe_int(
+                    model.get("shadow_corpus_last_seq"), 0
+                ),
+                "shadow_corpus_snapshot_sha256": model.get(
+                    "shadow_corpus_snapshot_sha256"
+                ),
+                "shadow_corpus_durability_state": model.get(
+                    "shadow_corpus_durability_state"
+                )
+                or "unprotected",
                 "selected_shadow_row_count": _safe_int(
                     model.get("selected_shadow_row_count"),
                     _safe_int(training_window.get("shadow_rows"), 0),
@@ -1582,6 +1896,12 @@ class PredictiveTrainerManager:
         await self._refresh_shadow_index_stats_cache()
         async with self._lock:
             self._reconcile_run_state()
+            trigger = self._scheduler_trigger_payload()
+            if str(trigger.get("reason") or "").strip() == "shadow_corpus_integrity_hold":
+                return {
+                    "status": "integrity_hold",
+                    "reason": trigger.get("shadow_corpus_integrity_reason"),
+                }
             if self.is_running():
                 return {
                     "status": "already_running",
@@ -1871,12 +2191,55 @@ class PredictiveTrainerManager:
                 ),
                 "trained_at": candidate_attestation.get("validation", {}).get("trained_at"),
                 "version": candidate_attestation.get("training", {}).get("version"),
+                "raw_shadow_entry_count": _safe_int(
+                    candidate_attestation.get("training", {}).get("raw_shadow_entry_count"), 0
+                ),
+                "shadow_corpus_instance_id": candidate_attestation.get("training", {}).get(
+                    "shadow_corpus_instance_id"
+                ),
+                "shadow_corpus_created_at": candidate_attestation.get("training", {}).get(
+                    "shadow_corpus_created_at"
+                ),
+                "shadow_corpus_entry_count": _safe_int(
+                    candidate_attestation.get("training", {}).get(
+                        "shadow_corpus_entry_count"
+                    ),
+                    _safe_int(
+                        candidate_attestation.get("training", {}).get(
+                            "raw_shadow_entry_count"
+                        ),
+                        0,
+                    ),
+                ),
+                "shadow_corpus_last_seq": _safe_int(
+                    candidate_attestation.get("training", {}).get("shadow_corpus_last_seq"),
+                    0,
+                ),
+                "shadow_corpus_snapshot_sha256": candidate_attestation.get(
+                    "training", {}
+                ).get("shadow_corpus_snapshot_sha256"),
+                "shadow_corpus_durability_state": candidate_attestation.get(
+                    "training", {}
+                ).get("shadow_corpus_durability_state")
+                or "unprotected",
                 "calibration_rows": _safe_int(
                     _read_json(calibration_candidate).get("rows"), 0
                 )
                 if calibration_candidate.exists()
                 else 0,
             }
+            manifest["raw_shadow_entry_count"] = manifest["candidate_model"].get(
+                "raw_shadow_entry_count"
+            )
+            manifest["shadow_corpus_instance_id"] = manifest["candidate_model"].get(
+                "shadow_corpus_instance_id"
+            )
+            manifest["shadow_corpus_created_at"] = manifest["candidate_model"].get(
+                "shadow_corpus_created_at"
+            )
+            manifest["shadow_corpus_last_seq"] = manifest["candidate_model"].get(
+                "shadow_corpus_last_seq"
+            )
             manifest["evaluation_pack"] = {
                 "window": candidate_eval_pack.get("window"),
                 "calibration_and_sample_sufficiency": candidate_eval_pack.get(
@@ -1939,6 +2302,7 @@ class PredictiveTrainerManager:
                     "shadow_rows": manifest["candidate_model"].get("shadow_rows"),
                 }
             )
+            self._maybe_archive_shadow_corpus_sync(force=True)
         except Exception as exc:
             manifest["status"] = "failed"
             manifest["completed_at"] = _utc_iso()
@@ -2061,6 +2425,11 @@ class PredictiveTrainerManager:
         return promotion
 
     async def promote_run(self, run_id: str, *, forced: bool = True) -> dict[str, Any]:
+        corpus_state = self._shadow_corpus_consistency_payload()
+        if str(corpus_state.get("shadow_corpus_consistency_state") or "") != "consistent":
+            raise RuntimeError(
+                f"shadow_corpus_integrity_hold:{corpus_state.get('shadow_corpus_integrity_reason')}"
+            )
         manifest = self._read_manifest(run_id)
         artifacts = manifest.get("artifacts") or {}
         model_candidate = Path(str(artifacts.get("candidate_model") or ""))
@@ -2118,6 +2487,11 @@ class PredictiveTrainerManager:
         latest_completed_promotion_state = (
             str(latest_completed_promotion.get("state") or "").strip() or None
         )
+        corpus_state = self._shadow_corpus_consistency_payload(
+            shadow_stats=trigger,
+            active_model=active_model,
+            latest_completed_manifest=latest_manifest if latest_manifest else None,
+        )
         shadow_index_probe_state = (
             str(trigger.get("shadow_index_probe_state") or "").strip() or "unavailable"
         )
@@ -2140,6 +2514,8 @@ class PredictiveTrainerManager:
         )
         if shadow_index_probe_state != "available":
             model_freshness_state = "shadow_index_unavailable"
+        elif str(corpus_state.get("shadow_corpus_consistency_state") or "") != "consistent":
+            model_freshness_state = "shadow_corpus_integrity_hold"
         elif active_model_raw_shadow_entry_count > 0 and (shadow_row_lag or 0) <= 0:
             model_freshness_state = "current"
         elif (
@@ -2176,6 +2552,7 @@ class PredictiveTrainerManager:
             "shadow_index_probe_state": shadow_index_probe_state,
             "shadow_index_probe_error": trigger.get("shadow_index_probe_error"),
             "shadow_index_probe_age_secs": trigger.get("shadow_index_probe_age_secs"),
+            **corpus_state,
         }
 
     def _scheduler_contract_payload(self) -> dict[str, Any]:
@@ -2203,6 +2580,7 @@ class PredictiveTrainerManager:
             "shadow_index_path": str(self.config.shadow_sqlite_path),
             "shadow_index_legacy_path": str(self.config.shadow_index_path),
             "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
+            "shadow_archive_root": str(self.config.shadow_archive_root),
             "train_interval_secs": self.config.train_interval_secs,
             "scheduler_poll_secs": self.config.scheduler_poll_secs,
             "train_timeout_secs": self.config.train_timeout_secs,
@@ -2232,6 +2610,7 @@ class PredictiveTrainerManager:
             "shadow_index_path": str(self.config.shadow_sqlite_path),
             "shadow_index_legacy_path": str(self.config.shadow_index_path),
             "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
+            "shadow_archive_root": str(self.config.shadow_archive_root),
             "scheduler_trigger": self._scheduler_trigger_payload(),
             **freshness,
         }

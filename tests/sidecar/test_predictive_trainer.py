@@ -14,7 +14,9 @@ import src.api.predictive_trainer as predictive_trainer
 from src.api.predictive_trainer import PredictiveTrainerConfig, PredictiveTrainerManager
 
 
-def _write_shadow_sqlite_count(sqlite_path: Path, count: int) -> None:
+def _write_shadow_sqlite_count(
+    sqlite_path: Path, count: int, *, corpus_instance_id: str = "corpus-a"
+) -> None:
     sqlite_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(sqlite_path))
     conn.executescript(
@@ -24,23 +26,32 @@ def _write_shadow_sqlite_count(sqlite_path: Path, count: int) -> None:
             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
             entry_count INTEGER NOT NULL DEFAULT 0,
             last_seq INTEGER NOT NULL DEFAULT 0,
-            last_write_at TEXT
+            last_write_at TEXT,
+            corpus_instance_id TEXT,
+            corpus_created_at TEXT
         );
         """,
     )
     conn.execute(
         """
         INSERT OR REPLACE INTO predictive_candidate_firehose_shadow_outcomes_stats
-            (singleton, entry_count, last_seq, last_write_at)
-        VALUES (1, ?, ?, '2026-04-07T00:00:00Z')
+            (singleton, entry_count, last_seq, last_write_at, corpus_instance_id, corpus_created_at)
+        VALUES (1, ?, ?, '2026-04-07T00:00:00Z', ?, '2026-04-07T00:00:00Z')
         """,
-        (count, count),
+        (count, count, corpus_instance_id),
     )
     conn.commit()
     conn.close()
 
 
-def _write_active_training_artifact(config: PredictiveTrainerConfig, *, raw_shadow_entry_count: int, shadow_rows: int | None = None, rows: int | None = None) -> None:
+def _write_active_training_artifact(
+    config: PredictiveTrainerConfig,
+    *,
+    raw_shadow_entry_count: int,
+    shadow_rows: int | None = None,
+    rows: int | None = None,
+    corpus_instance_id: str = "corpus-a",
+) -> None:
     config.training_path.write_text(
         json.dumps(
             {
@@ -48,6 +59,10 @@ def _write_active_training_artifact(config: PredictiveTrainerConfig, *, raw_shad
                     "rows": rows if rows is not None else raw_shadow_entry_count,
                     "shadow_rows": shadow_rows if shadow_rows is not None else raw_shadow_entry_count,
                     "raw_shadow_entry_count": raw_shadow_entry_count,
+                    "shadow_corpus_instance_id": corpus_instance_id,
+                    "shadow_corpus_entry_count": raw_shadow_entry_count,
+                    "shadow_corpus_last_seq": raw_shadow_entry_count,
+                    "shadow_corpus_durability_state": "durable_local_only",
                 },
                 "validation": {
                     "positive_rows": 10,
@@ -1079,14 +1094,17 @@ async def test_shutdown_marks_running_manifest_cancelled(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_promote_run_updates_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 1)
     run_id = "run-123"
     run_dir = manager._run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     model_path = run_dir / "model_candidate.json"
     training_path = run_dir / "prelaunch_training_candidate.json"
     calibration_path = run_dir / "calibration_candidate.json"
+    ledger_path = run_dir / "next_state_ledger_candidate.jsonl"
     for path in (model_path, training_path, calibration_path):
         path.write_text("{}", encoding="utf-8")
+    ledger_path.write_text('{"row":1}\n', encoding="utf-8")
 
     manager._write_manifest(
         run_id,
@@ -1096,6 +1114,7 @@ async def test_promote_run_updates_manifest(tmp_path: Path, monkeypatch: pytest.
                 "candidate_model": str(model_path),
                 "candidate_training": str(training_path),
                 "candidate_calibration": str(calibration_path),
+                "candidate_ledger": str(ledger_path),
             },
             "promotion": {"state": "not_attempted"},
         },
@@ -1117,6 +1136,7 @@ async def test_promote_run_updates_manifest(tmp_path: Path, monkeypatch: pytest.
 @pytest.mark.asyncio
 async def test_promote_run_uses_executor_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 1)
     run_id = "run-executor"
     run_dir = manager._run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
