@@ -317,7 +317,18 @@ data/                  # Historical and cache data
 
 ## 📄 License
 
-This project is proprietary software. All rights reserved.
+This repository is licensed under the Apache License, Version 2.0.
+See `LICENSE` for the full terms.
+
+## 🗃️ Archive Policy
+
+- Active sidecar runtime surface remains in:
+  - `src/api/`
+  - `scripts/sidecar_run.sh`
+  - `scripts/sidecar_smoke.sh`
+  - `tests/sidecar/`
+- Legacy implementation artifacts were moved to `archive/legacy_2026q2/`.
+- A long-lived preservation branch is kept at `dev/fastapi_sidecar_legacy_lab`.
 
 ## ⚠️ Disclaimer
 
