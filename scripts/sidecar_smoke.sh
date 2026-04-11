@@ -8,10 +8,21 @@ PREDICT_ENDPOINT="${SIDECAR_URL%/}/predict"
 TOKEN="${SIDECAR_SMOKE_TOKEN:-SOL/USDC}"
 EXPECTED_MODE="${SIDECAR_EXPECTED_MODE:-}"
 
+if [[ -n "${SIDECAR_SMOKE_PYTHON_BIN:-}" ]]; then
+  PYTHON_BIN="$SIDECAR_SMOKE_PYTHON_BIN"
+elif command -v python >/dev/null 2>&1; then
+  PYTHON_BIN="python"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN="python3"
+else
+  echo "[sidecar-smoke] ERROR: no Python interpreter found (python/python3)" >&2
+  exit 2
+fi
+
 echo "[sidecar-smoke] Checking health at $HEALTH_ENDPOINT"
 health_response=$(curl -fsS "$HEALTH_ENDPOINT")
-mode=$(echo "$health_response" | python -c 'import json,sys;print(json.load(sys.stdin)["mode"])')
-models=$(echo "$health_response" | python -c 'import json,sys;print(json.load(sys.stdin)["models_loaded"])')
+mode=$(echo "$health_response" | "$PYTHON_BIN" -c 'import json,sys;print(json.load(sys.stdin)["mode"])')
+models=$(echo "$health_response" | "$PYTHON_BIN" -c 'import json,sys;print(json.load(sys.stdin)["models_loaded"])')
 
 echo "[sidecar-smoke] Mode: $mode | Models loaded: $models"
 
@@ -22,8 +33,8 @@ fi
 
 echo "[sidecar-smoke] Checking feature schema at $SCHEMA_ENDPOINT"
 schema_response=$(curl -fsS "$SCHEMA_ENDPOINT")
-server_schema_version=$(echo "$schema_response" | python -c 'import json,sys;print(json.load(sys.stdin)["schema_version"])')
-server_expected_dim=$(echo "$schema_response" | python -c 'import json,sys;print(json.load(sys.stdin)["expected_dim"])')
+server_schema_version=$(echo "$schema_response" | "$PYTHON_BIN" -c 'import json,sys;print(json.load(sys.stdin)["schema_version"])')
+server_expected_dim=$(echo "$schema_response" | "$PYTHON_BIN" -c 'import json,sys;print(json.load(sys.stdin)["expected_dim"])')
 
 if [[ "$server_schema_version" != "v1" ]]; then
   echo "[sidecar-smoke] ERROR: expected schema_version 'v1' but got '$server_schema_version'" >&2
@@ -35,7 +46,7 @@ if [[ "$server_expected_dim" != "29" ]]; then
 fi
 
 tmp_payload=$(mktemp)
-python - <<'PY' "$tmp_payload" "$TOKEN" > /dev/null
+"$PYTHON_BIN" - <<'PY' "$tmp_payload" "$TOKEN" > /dev/null
 import json, sys
 path, token = sys.argv[1:3]
 features = [round(i * 0.1, 2) for i in range(1, 30)]
@@ -46,11 +57,11 @@ PY
 
 echo "[sidecar-smoke] Posting sample payload to $PREDICT_ENDPOINT"
 predict_response=$(curl -fsS -X POST "$PREDICT_ENDPOINT" -H 'Content-Type: application/json' --data-binary "@${tmp_payload}")
-runtime_ms=$(echo "$predict_response" | python -c 'import json,sys;print(round(json.load(sys.stdin)["latency_ms"], 2))')
-prediction=$(echo "$predict_response" | python -c 'import json,sys;print(json.load(sys.stdin)["prediction"])')
-score=$(echo "$predict_response" | python -c 'import json,sys;print(json.load(sys.stdin)["score"])')
-inference_id=$(echo "$predict_response" | python -c 'import json,sys;print(json.load(sys.stdin)["inference_id"])')
-resp_schema_version=$(echo "$predict_response" | python -c 'import json,sys;print(json.load(sys.stdin)["schema_version"])')
+runtime_ms=$(echo "$predict_response" | "$PYTHON_BIN" -c 'import json,sys;print(round(json.load(sys.stdin)["latency_ms"], 2))')
+prediction=$(echo "$predict_response" | "$PYTHON_BIN" -c 'import json,sys;print(json.load(sys.stdin)["prediction"])')
+score=$(echo "$predict_response" | "$PYTHON_BIN" -c 'import json,sys;print(json.load(sys.stdin)["score"])')
+inference_id=$(echo "$predict_response" | "$PYTHON_BIN" -c 'import json,sys;print(json.load(sys.stdin)["inference_id"])')
+resp_schema_version=$(echo "$predict_response" | "$PYTHON_BIN" -c 'import json,sys;print(json.load(sys.stdin)["schema_version"])')
 
 rm -f "$tmp_payload"
 
@@ -63,7 +74,7 @@ if [[ "$resp_schema_version" != "v1" ]]; then
   exit 7
 fi
 
-python - <<'PY' "$score" > /dev/null
+"$PYTHON_BIN" - <<'PY' "$score" > /dev/null
 import math, sys
 v = float(sys.argv[1])
 if not (math.isfinite(v) and 0.0 <= v <= 1.0):
@@ -71,4 +82,4 @@ if not (math.isfinite(v) and 0.0 <= v <= 1.0):
 PY
 
 echo "[sidecar-smoke] Prediction: $prediction | Score: $score | Latency: ${runtime_ms}ms | inference_id: $inference_id"
-echo "$predict_response" | python -m json.tool
+echo "$predict_response" | "$PYTHON_BIN" -m json.tool
