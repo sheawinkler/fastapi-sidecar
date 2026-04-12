@@ -1738,9 +1738,19 @@ async def trainer_health() -> Dict[str, Any]:
     return _trainer_manager.health_payload()
 
 
+@app.get("/trainer/health/deep")
+async def trainer_health_deep() -> Dict[str, Any]:
+    return await _trainer_manager.health_payload_deep_async()
+
+
 @app.get("/trainer/status")
 async def trainer_status() -> Dict[str, Any]:
     return _trainer_manager.status_payload()
+
+
+@app.get("/trainer/status/deep")
+async def trainer_status_deep() -> Dict[str, Any]:
+    return await _trainer_manager.status_payload_deep_async()
 
 
 @app.get("/trainer/history")

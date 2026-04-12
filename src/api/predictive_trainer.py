@@ -565,7 +565,30 @@ class PredictiveTrainerManager:
         self._pending_restart: dict[str, Any] | None = None
         self._guidance_subscriber_count_provider: Callable[[], int] | None = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sidecar-trainer")
+        self._latest_manifest_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
+        self._latest_manifest_cache_ttl_secs = max(
+            0.25,
+            _safe_float(
+                os.getenv("SIDECAR_PREDICTIVE_TRAINER_MANIFEST_CACHE_TTL_SECS"), 1.5
+            )
+            or 1.5,
+        )
         self._shadow_index_stats_cache = self._bootstrap_shadow_index_stats_cache()
+        self._snapshot_refresh_secs = max(
+            1.0,
+            _safe_float(
+                os.getenv("SIDECAR_PREDICTIVE_TRAINER_SNAPSHOT_REFRESH_SECS"), 5.0
+            )
+            or 5.0,
+        )
+        self._snapshot_task: asyncio.Task | None = None
+        self._snapshot_updated_monotonic: float | None = None
+        self._health_snapshot_state = "bootstrapping"
+        self._status_snapshot_state = "bootstrapping"
+        self._health_snapshot_error: str | None = None
+        self._status_snapshot_error: str | None = None
+        self._health_snapshot_payload = self._health_payload_base_snapshot()
+        self._status_snapshot_payload = self._status_payload_base_snapshot()
         if self.config.scheduler_disabled_reason:
             print(
                 "WARNING: predictive trainer scheduler disabled "
@@ -587,6 +610,109 @@ class PredictiveTrainerManager:
             return max(0, int(self._guidance_subscriber_count_provider()))
         except Exception:
             return 0
+
+    def _health_payload_base_snapshot(self) -> dict[str, Any]:
+        return {
+            "status": "ok",
+            **self._scheduler_contract_payload(),
+            "auto_promote": self.config.auto_promote,
+            "relaunch_enabled": self.config.relaunch_enabled,
+            "is_running": self.is_running(),
+            "algo_repo_dir": str(self.config.algo_repo_dir),
+            "algo_repo_exists": self.config.algo_repo_dir.exists(),
+            "active_model_path": str(self.config.model_path),
+            "active_training_path": str(self.config.training_path),
+            "active_calibration_path": str(self.config.calibration_path),
+            "active_next_state_ledger_path": str(self.config.next_state_ledger_path),
+            "shadow_index_path": str(self.config.shadow_sqlite_path),
+            "shadow_index_legacy_path": str(self.config.shadow_index_path),
+            "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
+            "shadow_archive_root": str(self.config.shadow_archive_root),
+            "train_interval_secs": self.config.train_interval_secs,
+            "scheduler_poll_secs": self.config.scheduler_poll_secs,
+            "train_timeout_secs": self.config.train_timeout_secs,
+            "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
+            "pending_restart": self._pending_restart,
+            "scheduler_trigger": {
+                "should_start": False,
+                "reason": "snapshot_not_ready",
+            },
+            "model_freshness_state": "snapshot_not_ready",
+        }
+
+    def _status_payload_base_snapshot(self) -> dict[str, Any]:
+        return {
+            "status": "running" if self.is_running() else "idle",
+            **self._scheduler_contract_payload(),
+            "active_run_id": self._active_run_id,
+            "active_run": None,
+            "active_run_stage": None,
+            "active_run_stage_started_at": None,
+            "active_run_stage_updated_at": None,
+            "active_run_stage_message": None,
+            "pending_restart": self._pending_restart,
+            "active_model": self._active_artifacts(),
+            "latest_run_context": self._latest_run_context_path(),
+            "shadow_index_path": str(self.config.shadow_sqlite_path),
+            "shadow_index_legacy_path": str(self.config.shadow_index_path),
+            "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
+            "shadow_archive_root": str(self.config.shadow_archive_root),
+            "scheduler_trigger": {
+                "should_start": False,
+                "reason": "snapshot_not_ready",
+            },
+            "model_freshness_state": "snapshot_not_ready",
+        }
+
+    def _snapshot_metadata(self, *, state: str, error: str | None) -> dict[str, Any]:
+        age_secs: float | None = None
+        if self._snapshot_updated_monotonic is not None:
+            age_secs = max(0.0, time.monotonic() - self._snapshot_updated_monotonic)
+        return {
+            "snapshot_age_secs": age_secs,
+            "snapshot_state": state,
+            "snapshot_error": error,
+        }
+
+    async def _refresh_status_snapshots(self, *, force: bool = False) -> None:
+        if not force and self._snapshot_updated_monotonic is not None:
+            age_secs = max(0.0, time.monotonic() - self._snapshot_updated_monotonic)
+            if age_secs < (self._snapshot_refresh_secs * 0.5):
+                return
+        try:
+            health_payload, status_payload = await self._run_sync_on_executor(
+                self._build_deep_snapshot_payloads_sync
+            )
+            self._health_snapshot_payload = health_payload
+            self._status_snapshot_payload = status_payload
+            self._snapshot_updated_monotonic = time.monotonic()
+            self._health_snapshot_state = "fresh"
+            self._status_snapshot_state = "fresh"
+            self._health_snapshot_error = None
+            self._status_snapshot_error = None
+        except Exception as exc:
+            error_text = str(exc)
+            self._health_snapshot_error = error_text
+            self._status_snapshot_error = error_text
+            if self._snapshot_updated_monotonic is None:
+                self._health_snapshot_payload = self._health_payload_base_snapshot()
+                self._status_snapshot_payload = self._status_payload_base_snapshot()
+                self._health_snapshot_state = "error"
+                self._status_snapshot_state = "error"
+            else:
+                self._health_snapshot_state = "stale"
+                self._status_snapshot_state = "stale"
+
+    async def _snapshot_loop(self) -> None:
+        while True:
+            try:
+                await self._refresh_status_snapshots()
+            except Exception:
+                pass
+            await asyncio.sleep(self._snapshot_refresh_secs)
+
+    def _build_deep_snapshot_payloads_sync(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        return self._health_payload_deep_sync(), self._status_payload_deep_sync()
 
     def _bootstrap_shadow_index_stats_cache(self) -> dict[str, Any]:
         state_path = self.config.scheduler_state_path
@@ -953,6 +1079,9 @@ class PredictiveTrainerManager:
         return result
 
     async def start(self) -> None:
+        await self._refresh_status_snapshots(force=True)
+        if self._snapshot_task is None or self._snapshot_task.done():
+            self._snapshot_task = asyncio.create_task(self._snapshot_loop())
         if not self.config.scheduler_enabled:
             return
         if self._scheduler_task and not self._scheduler_task.done():
@@ -962,6 +1091,11 @@ class PredictiveTrainerManager:
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
 
     async def shutdown(self) -> None:
+        if self._snapshot_task:
+            self._snapshot_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._snapshot_task
+            self._snapshot_task = None
         with contextlib.suppress(Exception):
             await self._run_sync_on_executor(
                 self._maybe_archive_shadow_corpus_sync, force=True
@@ -1133,6 +1267,7 @@ class PredictiveTrainerManager:
     def _write_manifest(self, run_id: str, payload: dict[str, Any]) -> None:
         with self._state_io_lock:
             _write_json(self._manifest_path(run_id), payload)
+            self._latest_manifest_cache.clear()
 
     def _run_log_paths(self, run_id: str) -> dict[str, str]:
         logs_dir = self._run_dir(run_id) / "logs"
@@ -1353,7 +1488,14 @@ class PredictiveTrainerManager:
         return str(files[0]) if files else None
 
     def _latest_manifest_summary(self, *, status: str | None = None) -> dict[str, Any] | None:
+        cache_key = (status or "__any__").strip().lower()
+        now_monotonic = time.monotonic()
         with self._state_io_lock:
+            cached_entry = self._latest_manifest_cache.get(cache_key)
+            if cached_entry is not None:
+                cache_ts, cache_payload = cached_entry
+                if (now_monotonic - cache_ts) <= self._latest_manifest_cache_ttl_secs:
+                    return dict(cache_payload) if isinstance(cache_payload, dict) else None
             manifests = sorted(
                 self.config.runs_dir.glob("*/manifest.json"),
                 key=lambda path: path.stat().st_mtime,
@@ -1368,7 +1510,10 @@ class PredictiveTrainerManager:
                     continue
                 if status is not None and str(payload.get("status") or "").strip().lower() != status:
                     continue
-                return payload
+                payload_copy = dict(payload)
+                self._latest_manifest_cache[cache_key] = (now_monotonic, payload_copy)
+                return payload_copy
+            self._latest_manifest_cache[cache_key] = (now_monotonic, None)
         return None
 
     def _default_scheduler_state(self) -> dict[str, Any]:
@@ -2724,7 +2869,7 @@ class PredictiveTrainerManager:
             "scheduler_disabled_reason": self.config.scheduler_disabled_reason,
         }
 
-    def health_payload(self) -> dict[str, Any]:
+    def _health_payload_deep_sync(self) -> dict[str, Any]:
         self._reconcile_run_state()
         freshness = self._freshness_payload()
         return {
@@ -2752,7 +2897,7 @@ class PredictiveTrainerManager:
             **freshness,
         }
 
-    def status_payload(self) -> dict[str, Any]:
+    def _status_payload_deep_sync(self) -> dict[str, Any]:
         self._reconcile_run_state()
         manifest = self._read_manifest_if_exists(self._active_run_id) if self._active_run_id else None
         active_run = self._manifest_for_status(self._active_run_id, manifest) if self._active_run_id else None
@@ -2776,6 +2921,46 @@ class PredictiveTrainerManager:
             "scheduler_trigger": self._scheduler_trigger_payload(),
             **freshness,
         }
+
+    def health_payload(self) -> dict[str, Any]:
+        payload = dict(self._health_snapshot_payload)
+        payload.update(
+            self._snapshot_metadata(
+                state=self._health_snapshot_state,
+                error=self._health_snapshot_error,
+            )
+        )
+        return payload
+
+    def status_payload(self) -> dict[str, Any]:
+        payload = dict(self._status_snapshot_payload)
+        payload.update(
+            self._snapshot_metadata(
+                state=self._status_snapshot_state,
+                error=self._status_snapshot_error,
+            )
+        )
+        return payload
+
+    async def health_payload_deep_async(self) -> dict[str, Any]:
+        payload = await self._run_sync_on_executor(self._health_payload_deep_sync)
+        payload.update(
+            self._snapshot_metadata(
+                state="deep",
+                error=None,
+            )
+        )
+        return payload
+
+    async def status_payload_deep_async(self) -> dict[str, Any]:
+        payload = await self._run_sync_on_executor(self._status_payload_deep_sync)
+        payload.update(
+            self._snapshot_metadata(
+                state="deep",
+                error=None,
+            )
+        )
+        return payload
 
     def history_payload(self, limit: int = 25) -> dict[str, Any]:
         return {
