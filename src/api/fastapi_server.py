@@ -1784,13 +1784,21 @@ async def trainer_candidate_model(run_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+async def _start_trainer_manager_background() -> None:
+    try:
+        await _trainer_manager.start()
+    except Exception:
+        logger.exception("trainer manager startup failed")
+
+
 @app.on_event("startup")
 async def bootstrap_signal_cache() -> None:
     if os.getenv("SIGNAL_CACHE_ENABLED", "true").lower() != "true":
         logger.info("Signal cache disabled")
     else:
         asyncio.create_task(signal_cache.run())
-    await _trainer_manager.start()
+    # Availability-first: keep API startup non-blocking while trainer snapshot/scheduler warms.
+    asyncio.create_task(_start_trainer_manager_background())
 
 
 @app.on_event("shutdown")
