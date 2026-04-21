@@ -1321,7 +1321,10 @@ async def predict(req: PredictRequest) -> PredictResponse:
     start = time.perf_counter()
     inference_id = uuid.uuid4().hex
 
-    token, features, model, schema_version = _derive_predict_inputs(req)
+    try:
+        token, features, model, schema_version = _derive_predict_inputs(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # Determine expected feature dimension.
     expected_dim = FEATURE_DIM

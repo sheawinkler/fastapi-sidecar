@@ -207,6 +207,15 @@ def test_predict_vector_features_returns_score_and_schema(sidecar_server_module)
     assert body["metadata"].get("feature", {}).get("input_type") == "array"
 
 
+def test_predict_empty_payload_returns_400_not_500(sidecar_server_module):
+    with TestClient(sidecar_server_module.app) as client:
+        resp = client.post("/predict", json={})
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["detail"] == "Feature object is empty"
+
+
 def test_predict_uses_inference_executor_helper(sidecar_server_module, monkeypatch: pytest.MonkeyPatch):
     captured = {}
 
