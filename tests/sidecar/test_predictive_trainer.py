@@ -1434,6 +1434,8 @@ def test_promote_candidate_relaunch_uses_wrapper_replace_env(tmp_path: Path, mon
         "_repo_launch_ready",
         lambda: {"status_clean": True, "branch": "main", "head_matches_origin_main": True},
     )
+    monkeypatch.setattr(manager, "_active_deploy_wrapper_pid", lambda: None)
+    monkeypatch.setattr(manager, "_active_live_trader_pid", lambda: None)
 
     captured: dict[str, object] = {}
 
@@ -1469,3 +1471,170 @@ def test_promote_candidate_relaunch_uses_wrapper_replace_env(tmp_path: Path, mon
     assert captured["env"]["SIDECAR_SKIP_POST_LAUNCH_TRAINER_TRIGGER"] == "1"
     assert "REAL_ALGOTRADER_WALLET" not in captured["env"]
     assert captured["start_new_session"] is True
+
+
+def test_promote_candidate_defers_when_wrapper_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    run_id = "run-wrapper-active"
+    run_dir = manager._run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    model_path = run_dir / "model_candidate.json"
+    training_path = run_dir / "prelaunch_training_candidate.json"
+    calibration_path = run_dir / "calibration_candidate.json"
+    for path in (model_path, training_path, calibration_path):
+        path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        manager,
+        "_current_open_positions",
+        lambda _work_dir: {"ok": True, "open_positions_remaining": 0},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_repo_launch_ready",
+        lambda: {"status_clean": True, "branch": "main", "head_matches_origin_main": True},
+    )
+    monkeypatch.setattr(manager, "_active_deploy_wrapper_pid", lambda: 7777)
+    monkeypatch.setattr(manager, "_active_live_trader_pid", lambda: None)
+    monkeypatch.setattr(
+        "src.api.predictive_trainer.subprocess.Popen",
+        lambda *_args, **_kwargs: pytest.fail("restart wrapper should not spawn when wrapper is active"),
+    )
+
+    result = manager._promote_candidate(
+        run_id=run_id,
+        model_candidate=model_path,
+        training_candidate=training_path,
+        calibration_candidate=calibration_path,
+        ledger_candidate=run_dir / "missing_ledger.jsonl",
+        forced=False,
+    )
+
+    assert result["state"] == "promoted_pending_restart"
+    assert result["active_wrapper_pid"] == 7777
+    assert manager._pending_restart == {
+        "run_id": run_id,
+        "reason": "wrapper_active",
+        "wrapper_pid": 7777,
+    }
+
+
+def test_promote_candidate_skips_restart_when_live_process_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    run_id = "run-live-active"
+    run_dir = manager._run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    model_path = run_dir / "model_candidate.json"
+    training_path = run_dir / "prelaunch_training_candidate.json"
+    calibration_path = run_dir / "calibration_candidate.json"
+    for path in (model_path, training_path, calibration_path):
+        path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        manager,
+        "_current_open_positions",
+        lambda _work_dir: {"ok": True, "open_positions_remaining": 0},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_repo_launch_ready",
+        lambda: {"status_clean": True, "branch": "main", "head_matches_origin_main": True},
+    )
+    monkeypatch.setattr(manager, "_active_deploy_wrapper_pid", lambda: None)
+    monkeypatch.setattr(manager, "_active_live_trader_pid", lambda: 8888)
+    monkeypatch.setattr(
+        "src.api.predictive_trainer.subprocess.Popen",
+        lambda *_args, **_kwargs: pytest.fail("restart wrapper should not spawn when live trader is active"),
+    )
+
+    result = manager._promote_candidate(
+        run_id=run_id,
+        model_candidate=model_path,
+        training_candidate=training_path,
+        calibration_candidate=calibration_path,
+        ledger_candidate=run_dir / "missing_ledger.jsonl",
+        forced=False,
+    )
+
+    assert result["state"] == "promoted_no_restart_live_process_running"
+    assert result["active_live_pid"] == 8888
+    assert manager._pending_restart is None
+
+
+def test_effective_restart_state_keeps_wrapper_active_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager._pending_restart = {
+        "run_id": "run-wrapper-pending",
+        "reason": "wrapper_active",
+        "wrapper_pid": 7777,
+    }
+    monkeypatch.setattr(
+        manager,
+        "_current_open_positions",
+        lambda _work_dir: {"ok": True, "open_positions_remaining": 0},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_repo_launch_ready",
+        lambda: {"status_clean": True, "branch": "main", "head_matches_origin_main": True},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_pid_matches_command_tokens",
+        lambda pid, tokens: pid == 7777 and "deploy_live.sh" in tokens,
+    )
+
+    pending_restart, effective_state = manager._effective_restart_state(
+        latest_completed_run_id="run-wrapper-pending",
+        latest_completed_promotion_state="promoted_pending_restart",
+        latest_completed_run_raw_shadow_entry_count=0,
+        active_model_raw_shadow_entry_count=0,
+        repo_state={"status_clean": True, "branch": "main", "head_matches_origin_main": True},
+    )
+
+    assert pending_restart == {
+        "run_id": "run-wrapper-pending",
+        "reason": "wrapper_active",
+        "wrapper_pid": 7777,
+    }
+    assert effective_state == "pending_restart_wrapper_active"
+
+
+def test_effective_restart_state_clears_wrapper_pending_when_model_serving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager._pending_restart = {
+        "run_id": "run-wrapper-done",
+        "reason": "wrapper_active",
+        "wrapper_pid": 7777,
+    }
+    manager.set_guidance_subscriber_count_provider(lambda: 1)
+    monkeypatch.setattr(
+        manager,
+        "_current_open_positions",
+        lambda _work_dir: {"ok": True, "open_positions_remaining": 0},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_repo_launch_ready",
+        lambda: {"status_clean": True, "branch": "main", "head_matches_origin_main": True},
+    )
+    monkeypatch.setattr(manager, "_pid_matches_command_tokens", lambda _pid, _tokens: False)
+
+    pending_restart, effective_state = manager._effective_restart_state(
+        latest_completed_run_id="run-wrapper-done",
+        latest_completed_promotion_state="promoted_pending_restart",
+        latest_completed_run_raw_shadow_entry_count=0,
+        active_model_raw_shadow_entry_count=0,
+        repo_state={"status_clean": True, "branch": "main", "head_matches_origin_main": True},
+    )
+
+    assert pending_restart is None
+    assert effective_state == "promoted_current"

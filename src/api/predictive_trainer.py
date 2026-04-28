@@ -1487,6 +1487,54 @@ class PredictiveTrainerManager:
         )
         return str(files[0]) if files else None
 
+    def _pid_matches_command_tokens(self, pid: int, required_tokens: list[str]) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            probe = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            return False
+        if probe.returncode != 0:
+            return False
+        cmd = (probe.stdout or "").strip()
+        if not cmd:
+            return False
+        return all(token in cmd for token in required_tokens)
+
+    def _active_live_trader_pid(self) -> int | None:
+        pid_path = self.config.algo_repo_dir / "logs/real_algotrader_live.pid"
+        try:
+            raw = pid_path.read_text(encoding="utf-8").strip()
+            pid = int(raw)
+        except Exception:
+            return None
+        if self._pid_matches_command_tokens(pid, ["real_algotrader", " run"]):
+            return pid
+        return None
+
+    def _active_deploy_wrapper_pid(self) -> int | None:
+        lock_pid_path = (
+            Path.home()
+            / "Library"
+            / "Caches"
+            / "algotraderv2_rust"
+            / "deploy_live_wrapper.lock"
+            / "pid"
+        )
+        try:
+            raw = lock_pid_path.read_text(encoding="utf-8").strip()
+            pid = int(raw)
+        except Exception:
+            return None
+        if self._pid_matches_command_tokens(pid, ["deploy_live.sh", "--live"]):
+            return pid
+        return None
+
     def _latest_manifest_summary(self, *, status: str | None = None) -> dict[str, Any] | None:
         cache_key = (status or "__any__").strip().lower()
         now_monotonic = time.monotonic()
@@ -1953,6 +2001,20 @@ class PredictiveTrainerManager:
                 "repo_state": repo_state,
             }
             effective_promotion_state = "pending_restart_repo_not_launch_ready"
+        elif str(pending_restart.get("reason") or "").strip() == "wrapper_active":
+            wrapper_pid = _safe_int(pending_restart.get("wrapper_pid"), 0)
+            if wrapper_pid > 0 and self._pid_matches_command_tokens(
+                wrapper_pid, ["deploy_live.sh", "--live"]
+            ):
+                pending_restart = {
+                    "run_id": pending_run_id,
+                    "reason": "wrapper_active",
+                    "wrapper_pid": wrapper_pid,
+                }
+                effective_promotion_state = "pending_restart_wrapper_active"
+            elif current_model_is_serving:
+                pending_restart = None
+                effective_promotion_state = "promoted_current"
         elif current_model_is_serving and (
             latest_completed_promotion_state == "promoted_pending_restart"
             or str(pending_restart.get("reason") or "").strip()
@@ -2660,6 +2722,24 @@ class PredictiveTrainerManager:
                 "repo_state": repo_state,
             }
             promotion["state"] = "promoted_pending_restart"
+            return promotion
+
+        active_wrapper_pid = self._active_deploy_wrapper_pid()
+        if active_wrapper_pid is not None:
+            self._pending_restart = {
+                "run_id": run_id,
+                "reason": "wrapper_active",
+                "wrapper_pid": active_wrapper_pid,
+            }
+            promotion["state"] = "promoted_pending_restart"
+            promotion["active_wrapper_pid"] = active_wrapper_pid
+            return promotion
+
+        active_live_pid = self._active_live_trader_pid()
+        if active_live_pid is not None:
+            promotion["state"] = "promoted_no_restart_live_process_running"
+            promotion["active_live_pid"] = active_live_pid
+            self._pending_restart = None
             return promotion
 
         restart_log = self._run_dir(run_id) / "logs" / "restart.stdout.log"
