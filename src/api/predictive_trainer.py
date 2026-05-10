@@ -364,6 +364,7 @@ class PredictiveTrainerConfig:
     python_bin: str
     train_timeout_secs: int
     min_new_shadow_rows_to_trigger: int
+    max_staleness_secs: int
     positive_share_collapse_tolerance: float
     calibration_mae_degradation_factor: float
     p_positive_brier_degradation_factor: float
@@ -521,6 +522,12 @@ class PredictiveTrainerConfig:
                     os.getenv("SIDECAR_PREDICTIVE_TRAINER_MIN_NEW_SHADOW_ROWS"), 100
                 ),
             ),
+            max_staleness_secs=max(
+                300,
+                _safe_int(
+                    os.getenv("SIDECAR_PREDICTIVE_TRAINER_MAX_STALENESS_SECS"), 3600
+                ),
+            ),
             positive_share_collapse_tolerance=max(
                 0.0,
                 min(
@@ -563,6 +570,14 @@ class PredictiveTrainerManager:
         self._active_run_id: str | None = None
         self._scheduler_task: asyncio.Task | None = None
         self._pending_restart: dict[str, Any] | None = None
+        self._scheduler_cycle_ok_count = 0
+        self._scheduler_cycle_error_count = 0
+        self._scheduler_last_cycle_at: str | None = None
+        self._scheduler_last_success_at: str | None = None
+        self._scheduler_last_exception_at: str | None = None
+        self._scheduler_last_exception_type: str | None = None
+        self._scheduler_last_exception_message: str | None = None
+        self._scheduler_last_exception_traceback: str | None = None
         self._guidance_subscriber_count_provider: Callable[[], int] | None = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sidecar-trainer")
         self._latest_manifest_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
@@ -611,6 +626,18 @@ class PredictiveTrainerManager:
         except Exception:
             return 0
 
+    def _scheduler_runtime_payload(self) -> dict[str, Any]:
+        return {
+            "scheduler_cycle_ok_count": int(self._scheduler_cycle_ok_count),
+            "scheduler_cycle_error_count": int(self._scheduler_cycle_error_count),
+            "scheduler_last_cycle_at": self._scheduler_last_cycle_at,
+            "scheduler_last_success_at": self._scheduler_last_success_at,
+            "scheduler_last_exception_at": self._scheduler_last_exception_at,
+            "scheduler_last_exception_type": self._scheduler_last_exception_type,
+            "scheduler_last_exception_message": self._scheduler_last_exception_message,
+            "scheduler_last_exception_traceback": self._scheduler_last_exception_traceback,
+        }
+
     def _health_payload_base_snapshot(self) -> dict[str, Any]:
         return {
             "status": "ok",
@@ -632,7 +659,9 @@ class PredictiveTrainerManager:
             "scheduler_poll_secs": self.config.scheduler_poll_secs,
             "train_timeout_secs": self.config.train_timeout_secs,
             "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
+            "max_staleness_secs": self.config.max_staleness_secs,
             "pending_restart": self._pending_restart,
+            "scheduler_runtime": self._scheduler_runtime_payload(),
             "scheduler_trigger": {
                 "should_start": False,
                 "reason": "snapshot_not_ready",
@@ -657,6 +686,7 @@ class PredictiveTrainerManager:
             "shadow_index_legacy_path": str(self.config.shadow_index_path),
             "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
             "shadow_archive_root": str(self.config.shadow_archive_root),
+            "scheduler_runtime": self._scheduler_runtime_payload(),
             "scheduler_trigger": {
                 "should_start": False,
                 "reason": "snapshot_not_ready",
@@ -713,6 +743,26 @@ class PredictiveTrainerManager:
 
     def _build_deep_snapshot_payloads_sync(self) -> tuple[dict[str, Any], dict[str, Any]]:
         return self._health_payload_deep_sync(), self._status_payload_deep_sync()
+
+    def _ensure_snapshot_materialized_sync(self) -> None:
+        if self._snapshot_updated_monotonic is not None:
+            return
+        try:
+            health_payload, status_payload = self._build_deep_snapshot_payloads_sync()
+            self._health_snapshot_payload = health_payload
+            self._status_snapshot_payload = status_payload
+            self._snapshot_updated_monotonic = time.monotonic()
+            self._health_snapshot_state = "fresh"
+            self._status_snapshot_state = "fresh"
+            self._health_snapshot_error = None
+            self._status_snapshot_error = None
+        except Exception as exc:
+            error_text = str(exc)
+            self._health_snapshot_error = error_text
+            self._status_snapshot_error = error_text
+            if self._snapshot_updated_monotonic is None:
+                self._health_snapshot_state = "error"
+                self._status_snapshot_state = "error"
 
     def _bootstrap_shadow_index_stats_cache(self) -> dict[str, Any]:
         state_path = self.config.scheduler_state_path
@@ -1149,21 +1199,39 @@ class PredictiveTrainerManager:
 
     async def _scheduler_loop(self) -> None:
         while True:
+            cycle_timestamp = _utc_iso()
             try:
                 await self._refresh_shadow_index_stats_cache()
                 await self._run_sync_on_executor(self._maybe_archive_shadow_corpus_sync)
                 trigger = self._scheduler_trigger_payload()
                 if trigger.get("should_start"):
                     await self.start_run(
-                        requested_by=str(trigger.get("requested_by") or "scheduler_interval"),
+                        requested_by=str(trigger.get("requested_by") or "scheduler_auto"),
                         auto_promote=None,
                     )
-            except Exception:
+                self._scheduler_cycle_ok_count += 1
+                self._scheduler_last_cycle_at = cycle_timestamp
+                self._scheduler_last_success_at = cycle_timestamp
+                self._scheduler_last_exception_at = None
+                self._scheduler_last_exception_type = None
+                self._scheduler_last_exception_message = None
+                self._scheduler_last_exception_traceback = None
+            except Exception as exc:
+                cycle_error_at = _utc_iso()
+                error_trace = traceback.format_exc()
+                self._scheduler_cycle_error_count += 1
+                self._scheduler_last_cycle_at = cycle_error_at
+                self._scheduler_last_exception_at = cycle_error_at
+                self._scheduler_last_exception_type = exc.__class__.__name__
+                self._scheduler_last_exception_message = str(exc)
+                self._scheduler_last_exception_traceback = error_trace
                 self._append_history(
                     {
-                        "timestamp": _utc_iso(),
+                        "timestamp": cycle_error_at,
                         "event": "scheduler_error",
-                        "message": "trainer scheduler cycle failed",
+                        "error_type": exc.__class__.__name__,
+                        "message": str(exc),
+                        "traceback": error_trace,
                     }
                 )
             await asyncio.sleep(self.config.scheduler_poll_secs)
@@ -1319,6 +1387,7 @@ class PredictiveTrainerManager:
                 "relaunch_enabled": self.config.relaunch_enabled,
                 "train_timeout_secs": self.config.train_timeout_secs,
                 "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
+                "max_staleness_secs": self.config.max_staleness_secs,
             },
             "paths": {
                 "run_dir": str(self._run_dir(run_id)),
@@ -1670,6 +1739,10 @@ class PredictiveTrainerManager:
             seconds_since_last_run_started is None
             or seconds_since_last_run_started >= self.config.train_interval_secs
         )
+        max_staleness_reached = (
+            seconds_since_last_run_started is None
+            or seconds_since_last_run_started >= self.config.max_staleness_secs
+        )
         row_threshold_reached = (
             new_shadow_rows_since_effective_baseline >= self.config.min_new_shadow_rows_to_trigger
         )
@@ -1688,9 +1761,9 @@ class PredictiveTrainerManager:
             reason = "row_threshold"
             requested_by = "scheduler_row_threshold"
             should_start = True
-        elif interval_elapsed:
-            reason = "interval"
-            requested_by = "scheduler_interval"
+        elif max_staleness_reached:
+            reason = "max_staleness"
+            requested_by = "scheduler_max_staleness"
             should_start = True
         elif compatibility_state == "compatible_same_family_current_superset":
             reason = "current_corpus_newer_same_family"
@@ -1710,7 +1783,9 @@ class PredictiveTrainerManager:
             "corpus_advanced_beyond_active_model": corpus_advanced_beyond_active_model,
             "active_model_covers_current_same_family": active_model_covers_current_same_family,
             "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
+            "max_staleness_secs": self.config.max_staleness_secs,
             "interval_elapsed": interval_elapsed,
+            "max_staleness_reached": max_staleness_reached,
             "row_threshold_reached": row_threshold_reached,
             "seconds_since_last_run_started": seconds_since_last_run_started,
             "last_run_id": state.get("last_run_id"),
@@ -2215,6 +2290,7 @@ class PredictiveTrainerManager:
         return {
             "ok": not issues,
             "issues": issues,
+            "primary_issue": issues[0] if issues else None,
             "candidate_positive_share": round(candidate_positive_share, 6),
             "active_positive_share": round(active_positive_share, 6),
             "candidate_global_mae_sol": candidate_mae,
@@ -2222,6 +2298,21 @@ class PredictiveTrainerManager:
             "candidate_p_positive_after_cost_brier": candidate_brier,
             "active_p_positive_after_cost_brier": active_brier,
         }
+
+    def _promotion_blocked_reason(
+        self, *, gate_result: dict[str, Any], auto_promote_enabled: bool
+    ) -> str | None:
+        if not auto_promote_enabled:
+            return "auto_promote_disabled"
+        if gate_result.get("ok"):
+            return None
+        primary_issue = str(gate_result.get("primary_issue") or "").strip()
+        if primary_issue:
+            return f"gate:{primary_issue}"
+        issues = gate_result.get("issues")
+        if isinstance(issues, list) and issues:
+            return f"gate:{str(issues[0]).strip()}"
+        return "gate:unknown"
 
     async def start_run(
         self,
@@ -2591,9 +2682,11 @@ class PredictiveTrainerManager:
             }
             manifest["promotion"]["gate_result"] = gate_result
 
+            auto_promote_enabled = bool(
+                self.config.auto_promote if auto_promote is None else auto_promote
+            )
             should_promote = bool(
-                (self.config.auto_promote if auto_promote is None else auto_promote)
-                and gate_result.get("ok")
+                auto_promote_enabled and gate_result.get("ok")
             )
             if should_promote:
                 self._update_manifest_stage(
@@ -2617,9 +2710,14 @@ class PredictiveTrainerManager:
                     **manifest["promotion"],
                     **promotion,
                 }
+                manifest["promotion"]["blocked_reason"] = None
             else:
                 manifest["promotion"]["state"] = (
                     "gated_off" if not gate_result.get("ok") else "auto_promote_disabled"
+                )
+                manifest["promotion"]["blocked_reason"] = self._promotion_blocked_reason(
+                    gate_result=gate_result,
+                    auto_promote_enabled=auto_promote_enabled,
                 )
             _write_json(promotion_record, manifest["promotion"])
             self._update_manifest_stage(
@@ -2972,7 +3070,9 @@ class PredictiveTrainerManager:
             "scheduler_poll_secs": self.config.scheduler_poll_secs,
             "train_timeout_secs": self.config.train_timeout_secs,
             "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
+            "max_staleness_secs": self.config.max_staleness_secs,
             "pending_restart": freshness.get("pending_restart"),
+            "scheduler_runtime": self._scheduler_runtime_payload(),
             "scheduler_trigger": self._scheduler_trigger_payload(),
             **freshness,
         }
@@ -2998,11 +3098,13 @@ class PredictiveTrainerManager:
             "shadow_index_legacy_path": str(self.config.shadow_index_path),
             "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
             "shadow_archive_root": str(self.config.shadow_archive_root),
+            "scheduler_runtime": self._scheduler_runtime_payload(),
             "scheduler_trigger": self._scheduler_trigger_payload(),
             **freshness,
         }
 
     def health_payload(self) -> dict[str, Any]:
+        self._ensure_snapshot_materialized_sync()
         payload = dict(self._health_snapshot_payload)
         payload.update(
             self._snapshot_metadata(
@@ -3013,6 +3115,7 @@ class PredictiveTrainerManager:
         return payload
 
     def status_payload(self) -> dict[str, Any]:
+        self._ensure_snapshot_materialized_sync()
         payload = dict(self._status_snapshot_payload)
         payload.update(
             self._snapshot_metadata(

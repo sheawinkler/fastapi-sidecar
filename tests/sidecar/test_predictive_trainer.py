@@ -111,6 +111,7 @@ def _make_config(tmp_path: Path) -> PredictiveTrainerConfig:
         python_bin="python3",
         train_timeout_secs=1800,
         min_new_shadow_rows_to_trigger=100,
+        max_staleness_secs=3600,
         positive_share_collapse_tolerance=0.05,
         calibration_mae_degradation_factor=1.25,
         p_positive_brier_degradation_factor=1.25,
@@ -457,7 +458,7 @@ def test_scheduler_trigger_skips_auto_retrain_when_active_model_covers_current_s
     assert trigger["shadow_corpus_integrity_reason"] is None
 
 
-def test_scheduler_trigger_uses_interval_when_active_model_lags_current_corpus(tmp_path: Path):
+def test_scheduler_trigger_uses_max_staleness_when_active_model_lags_current_corpus(tmp_path: Path):
     config = _make_config(tmp_path)
     manager = PredictiveTrainerManager(config)
     _write_active_training_artifact(config, raw_shadow_entry_count=170, shadow_rows=110, rows=115)
@@ -476,9 +477,10 @@ def test_scheduler_trigger_uses_interval_when_active_model_lags_current_corpus(t
     trigger = manager._scheduler_trigger_payload()
 
     assert trigger["should_start"] is True
-    assert trigger["requested_by"] == "scheduler_interval"
-    assert trigger["reason"] == "interval"
+    assert trigger["requested_by"] == "scheduler_max_staleness"
+    assert trigger["reason"] == "max_staleness"
     assert trigger["row_threshold_reached"] is False
+    assert trigger["max_staleness_reached"] is True
     assert trigger["shadow_row_lag_vs_active_model"] == 30
     assert trigger["corpus_advanced_beyond_active_model"] is True
     assert (
@@ -513,7 +515,7 @@ def test_scheduler_trigger_holds_only_on_incompatible_family(tmp_path: Path):
     )
 
 
-def test_scheduler_trigger_uses_interval_when_row_threshold_not_met(tmp_path: Path):
+def test_scheduler_trigger_uses_max_staleness_when_row_threshold_not_met(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     manager._write_scheduler_state(
         {
@@ -530,7 +532,9 @@ def test_scheduler_trigger_uses_interval_when_row_threshold_not_met(tmp_path: Pa
     trigger = manager._scheduler_trigger_payload()
 
     assert trigger["should_start"] is True
-    assert trigger["requested_by"] == "scheduler_interval"
+    assert trigger["requested_by"] == "scheduler_max_staleness"
+    assert trigger["reason"] == "max_staleness"
+    assert trigger["max_staleness_reached"] is True
     assert trigger["new_shadow_rows_since_trigger"] == 30
     assert trigger["row_threshold_reached"] is False
 
