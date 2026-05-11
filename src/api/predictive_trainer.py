@@ -368,6 +368,7 @@ class PredictiveTrainerConfig:
     positive_share_collapse_tolerance: float
     calibration_mae_degradation_factor: float
     p_positive_brier_degradation_factor: float
+    shadow_archive_min_interval_secs: int = 3600
 
     @property
     def runs_dir(self) -> Path:
@@ -558,6 +559,13 @@ class PredictiveTrainerConfig:
                 )
                 or 1.25,
             ),
+            shadow_archive_min_interval_secs=max(
+                60,
+                _safe_int(
+                    os.getenv("SIDECAR_PREDICTIVE_SHADOW_ARCHIVE_MIN_INTERVAL_SECS"),
+                    3600,
+                ),
+            ),
         )
 
 
@@ -578,6 +586,8 @@ class PredictiveTrainerManager:
         self._scheduler_last_exception_type: str | None = None
         self._scheduler_last_exception_message: str | None = None
         self._scheduler_last_exception_traceback: str | None = None
+        self._shadow_archive_last_attempt_monotonic: float | None = None
+        self._shadow_archive_last_attempt_ok: bool | None = None
         self._guidance_subscriber_count_provider: Callable[[], int] | None = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sidecar-trainer")
         self._latest_manifest_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
@@ -627,6 +637,11 @@ class PredictiveTrainerManager:
             return 0
 
     def _scheduler_runtime_payload(self) -> dict[str, Any]:
+        shadow_archive_last_attempt_age_secs: float | None = None
+        if self._shadow_archive_last_attempt_monotonic is not None:
+            shadow_archive_last_attempt_age_secs = max(
+                0.0, time.monotonic() - self._shadow_archive_last_attempt_monotonic
+            )
         return {
             "scheduler_cycle_ok_count": int(self._scheduler_cycle_ok_count),
             "scheduler_cycle_error_count": int(self._scheduler_cycle_error_count),
@@ -636,6 +651,11 @@ class PredictiveTrainerManager:
             "scheduler_last_exception_type": self._scheduler_last_exception_type,
             "scheduler_last_exception_message": self._scheduler_last_exception_message,
             "scheduler_last_exception_traceback": self._scheduler_last_exception_traceback,
+            "shadow_archive_min_interval_secs": int(
+                self.config.shadow_archive_min_interval_secs
+            ),
+            "shadow_archive_last_attempt_age_secs": shadow_archive_last_attempt_age_secs,
+            "shadow_archive_last_attempt_ok": self._shadow_archive_last_attempt_ok,
         }
 
     def _health_payload_base_snapshot(self) -> dict[str, Any]:
@@ -1096,6 +1116,12 @@ class PredictiveTrainerManager:
         return payload if isinstance(payload, dict) else {"ok": False, "reason": "archive_invalid_payload"}
 
     def _maybe_archive_shadow_corpus_sync(self, *, force: bool = False) -> dict[str, Any] | None:
+        if not force:
+            last_attempt = self._shadow_archive_last_attempt_monotonic
+            if last_attempt is not None:
+                elapsed = max(0.0, time.monotonic() - last_attempt)
+                if elapsed < float(self.config.shadow_archive_min_interval_secs):
+                    return None
         shadow_stats = self._ensure_shadow_index_stats_cache_fresh_sync(force=force)
         current_entry_count = _safe_int(shadow_stats.get("current_shadow_entry_count"), 0)
         current_instance_id = str(shadow_stats.get("shadow_corpus_instance_id") or "").strip()
@@ -1117,7 +1143,9 @@ class PredictiveTrainerManager:
             should_archive = True
         if not should_archive:
             return None
+        self._shadow_archive_last_attempt_monotonic = time.monotonic()
         result = self._archive_shadow_corpus_sync()
+        self._shadow_archive_last_attempt_ok = bool(result.get("ok"))
         self._append_history(
             {
                 "timestamp": _utc_iso(),
