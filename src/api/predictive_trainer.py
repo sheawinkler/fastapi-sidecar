@@ -1181,10 +1181,10 @@ class PredictiveTrainerManager:
         return result
 
     async def start(self) -> None:
-        await self._refresh_status_snapshots(force=True)
         if self._snapshot_task is None or self._snapshot_task.done():
             self._snapshot_task = asyncio.create_task(self._snapshot_loop())
         await self._ensure_scheduler_task_running()
+        await self._refresh_status_snapshots(force=True)
 
     async def _ensure_scheduler_task_running(self) -> None:
         if not self.config.scheduler_enabled:
