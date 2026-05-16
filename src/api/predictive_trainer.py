@@ -1576,6 +1576,24 @@ class PredictiveTrainerManager:
         payload.update(self._artifact_existence_flags(run_id))
         return payload
 
+    def _active_run_status_overlay(self) -> dict[str, Any] | None:
+        if not self.is_running() or not self._active_run_id:
+            return None
+        run_id = self._active_run_id
+        manifest = self._read_manifest_if_exists(run_id)
+        active_run = self._manifest_for_status(run_id, manifest)
+        return {
+            "status": "running",
+            "is_running": True,
+            "active_run_id": run_id,
+            "active_run": active_run,
+            "active_run_stage": (active_run or {}).get("stage"),
+            "active_run_stage_started_at": (active_run or {}).get("stage_started_at"),
+            "active_run_stage_updated_at": (active_run or {}).get("stage_updated_at"),
+            "active_run_stage_message": (active_run or {}).get("stage_message"),
+            "model_freshness_state": "running_catching_up",
+        }
+
     def _run_logged_subprocess(
         self,
         *,
@@ -3208,6 +3226,10 @@ class PredictiveTrainerManager:
     def health_payload(self) -> dict[str, Any]:
         self._ensure_snapshot_materialized_sync()
         payload = dict(self._health_snapshot_payload)
+        active_overlay = self._active_run_status_overlay()
+        if active_overlay:
+            payload["is_running"] = True
+            payload["model_freshness_state"] = "running_catching_up"
         payload.update(
             self._snapshot_metadata(
                 state=self._health_snapshot_state,
@@ -3219,6 +3241,9 @@ class PredictiveTrainerManager:
     def status_payload(self) -> dict[str, Any]:
         self._ensure_snapshot_materialized_sync()
         payload = dict(self._status_snapshot_payload)
+        active_overlay = self._active_run_status_overlay()
+        if active_overlay:
+            payload.update(active_overlay)
         payload.update(
             self._snapshot_metadata(
                 state=self._status_snapshot_state,
