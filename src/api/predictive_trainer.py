@@ -586,6 +586,7 @@ class PredictiveTrainerManager:
         self._scheduler_last_exception_type: str | None = None
         self._scheduler_last_exception_message: str | None = None
         self._scheduler_last_exception_traceback: str | None = None
+        self._scheduler_restart_count = 0
         self._shadow_archive_last_attempt_monotonic: float | None = None
         self._shadow_archive_last_attempt_ok: bool | None = None
         self._guidance_subscriber_count_provider: Callable[[], int] | None = None
@@ -642,6 +643,22 @@ class PredictiveTrainerManager:
             shadow_archive_last_attempt_age_secs = max(
                 0.0, time.monotonic() - self._shadow_archive_last_attempt_monotonic
             )
+        task = self._scheduler_task
+        task_exception_type: str | None = None
+        task_exception_message: str | None = None
+        if task is None:
+            task_state = "disabled" if not self.config.scheduler_enabled else "not_started"
+        elif task.cancelled():
+            task_state = "cancelled"
+        elif task.done():
+            task_state = "done"
+            with contextlib.suppress(Exception):
+                exc = task.exception()
+                if exc is not None:
+                    task_exception_type = exc.__class__.__name__
+                    task_exception_message = str(exc)
+        else:
+            task_state = "running"
         return {
             "scheduler_cycle_ok_count": int(self._scheduler_cycle_ok_count),
             "scheduler_cycle_error_count": int(self._scheduler_cycle_error_count),
@@ -651,6 +668,12 @@ class PredictiveTrainerManager:
             "scheduler_last_exception_type": self._scheduler_last_exception_type,
             "scheduler_last_exception_message": self._scheduler_last_exception_message,
             "scheduler_last_exception_traceback": self._scheduler_last_exception_traceback,
+            "scheduler_task_state": task_state,
+            "scheduler_task_done": bool(task and task.done()),
+            "scheduler_task_cancelled": bool(task and task.cancelled()),
+            "scheduler_task_exception_type": task_exception_type,
+            "scheduler_task_exception_message": task_exception_message,
+            "scheduler_restart_count": int(self._scheduler_restart_count),
             "shadow_archive_min_interval_secs": int(
                 self.config.shadow_archive_min_interval_secs
             ),
@@ -757,6 +780,7 @@ class PredictiveTrainerManager:
         while True:
             try:
                 await self._refresh_status_snapshots()
+                await self._ensure_scheduler_task_running()
             except Exception:
                 pass
             await asyncio.sleep(self._snapshot_refresh_secs)
@@ -1160,10 +1184,15 @@ class PredictiveTrainerManager:
         await self._refresh_status_snapshots(force=True)
         if self._snapshot_task is None or self._snapshot_task.done():
             self._snapshot_task = asyncio.create_task(self._snapshot_loop())
+        await self._ensure_scheduler_task_running()
+
+    async def _ensure_scheduler_task_running(self) -> None:
         if not self.config.scheduler_enabled:
             return
         if self._scheduler_task and not self._scheduler_task.done():
             return
+        if self._scheduler_task is not None:
+            self._scheduler_restart_count += 1
         await self._refresh_shadow_index_stats_cache()
         await self._run_sync_on_executor(self._maybe_archive_shadow_corpus_sync)
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
@@ -1253,15 +1282,16 @@ class PredictiveTrainerManager:
                 self._scheduler_last_exception_type = exc.__class__.__name__
                 self._scheduler_last_exception_message = str(exc)
                 self._scheduler_last_exception_traceback = error_trace
-                self._append_history(
-                    {
-                        "timestamp": cycle_error_at,
-                        "event": "scheduler_error",
-                        "error_type": exc.__class__.__name__,
-                        "message": str(exc),
-                        "traceback": error_trace,
-                    }
-                )
+                with contextlib.suppress(Exception):
+                    self._append_history(
+                        {
+                            "timestamp": cycle_error_at,
+                            "event": "scheduler_error",
+                            "error_type": exc.__class__.__name__,
+                            "message": str(exc),
+                            "traceback": error_trace,
+                        }
+                    )
             await asyncio.sleep(self.config.scheduler_poll_secs)
 
     def is_running(self) -> bool:
