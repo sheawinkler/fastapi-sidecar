@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -394,6 +395,34 @@ def test_read_json_retries_resource_deadlock_then_succeeds(tmp_path: Path, monke
 
     assert predictive_trainer._read_json(path) == {"ok": True}
     assert attempts["count"] == 2
+
+
+def test_scheduler_runtime_payload_reports_dead_scheduler_task(tmp_path: Path):
+    config = replace(
+        _make_config(tmp_path),
+        scheduler_enabled=True,
+        scheduler_config_source="test_enabled",
+        scheduler_disabled_reason=None,
+    )
+    manager = PredictiveTrainerManager(config)
+
+    async def _failed_task() -> asyncio.Task:
+        async def _boom() -> None:
+            raise RuntimeError("scheduler died")
+
+        task = asyncio.create_task(_boom())
+        await asyncio.sleep(0)
+        return task
+
+    manager._scheduler_task = asyncio.run(_failed_task())
+
+    payload = manager._scheduler_runtime_payload()
+
+    assert payload["scheduler_task_state"] == "done"
+    assert payload["scheduler_task_done"] is True
+    assert payload["scheduler_task_cancelled"] is False
+    assert payload["scheduler_task_exception_type"] == "RuntimeError"
+    assert payload["scheduler_task_exception_message"] == "scheduler died"
 
 
 def test_active_artifacts_degrades_when_model_read_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
