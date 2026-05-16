@@ -1340,32 +1340,51 @@ class PredictiveTrainerManager:
             self._current_task is None
             and latest_manifest is not None
             and str(latest_manifest.get("status") or "").strip().lower() == "running"
-            and not self.config.lock_path.exists()
         ):
             latest_run_id = str(latest_manifest.get("run_id") or "").strip()
+            lock_payload: dict[str, Any] | None = None
+            if self.config.lock_path.exists():
+                with contextlib.suppress(Exception):
+                    lock_payload_raw = _read_json(self.config.lock_path)
+                    if isinstance(lock_payload_raw, dict):
+                        lock_payload = lock_payload_raw
+            lock_run_id = str((lock_payload or {}).get("run_id") or "").strip()
+            if lock_run_id and latest_run_id and lock_run_id != latest_run_id:
+                return reconciliation
+            stale_reason = (
+                "running_manifest_with_stale_lock_without_live_task"
+                if self.config.lock_path.exists()
+                else "running_manifest_without_lock"
+            )
             latest_manifest["status"] = "failed"
             latest_manifest["completed_at"] = _utc_iso()
             latest_manifest["stage"] = "failed"
             latest_manifest["stage_updated_at"] = latest_manifest["completed_at"]
-            latest_manifest["stage_message"] = "reconciled running manifest without live task or lock"
+            latest_manifest["stage_message"] = (
+                "reconciled running manifest without live task"
+            )
             latest_manifest["error"] = {
                 "type": "StaleRunState",
-                "message": "reconciled running manifest without live task or lock",
+                "message": "reconciled running manifest without live task",
+                "reason": stale_reason,
             }
             if latest_run_id:
                 self._write_manifest(latest_run_id, latest_manifest)
-            self._append_history(
-                {
-                    "timestamp": _utc_iso(),
-                    "event": "trainer_run_reconciled_stale_state",
-                    "run_id": latest_run_id or None,
-                    "reason": "running_manifest_without_lock",
-                }
-            )
+            with contextlib.suppress(FileNotFoundError):
+                self.config.lock_path.unlink()
+            with contextlib.suppress(Exception):
+                self._append_history(
+                    {
+                        "timestamp": _utc_iso(),
+                        "event": "trainer_run_reconciled_stale_state",
+                        "run_id": latest_run_id or None,
+                        "reason": stale_reason,
+                    }
+                )
             if self._active_run_id == latest_run_id:
                 self._active_run_id = None
             reconciliation["stale_running_state"] = True
-            reconciliation["stale_reason"] = "running_manifest_without_lock"
+            reconciliation["stale_reason"] = stale_reason
 
         return reconciliation
 
@@ -1804,6 +1823,24 @@ class PredictiveTrainerManager:
         row_threshold_reached = (
             new_shadow_rows_since_effective_baseline >= self.config.min_new_shadow_rows_to_trigger
         )
+        last_run_id = str(state.get("last_run_id") or "").strip()
+        last_manifest = self._read_manifest_if_exists(last_run_id)
+        last_manifest_status = (
+            str((last_manifest or {}).get("status") or "").strip().lower()
+        )
+        failed_retry_backoff_secs = max(
+            60.0,
+            float(self.config.scheduler_poll_secs) * 2.0,
+        )
+        failed_run_retry_due = (
+            last_manifest_status in {"failed", "cancelled"}
+            and corpus_advanced_beyond_active_model
+            and shadow_row_lag_vs_active_model > 0
+            and (
+                seconds_since_last_run_started is None
+                or seconds_since_last_run_started >= failed_retry_backoff_secs
+            )
+        )
         requested_by: str | None = None
         reason = "waiting"
         should_start = False
@@ -1815,6 +1852,10 @@ class PredictiveTrainerManager:
             reason = "shadow_corpus_integrity_hold"
         elif active_model_covers_current_same_family:
             reason = "active_model_superset_same_family"
+        elif failed_run_retry_due:
+            reason = "failed_run_retry"
+            requested_by = "scheduler_failed_run_retry"
+            should_start = True
         elif row_threshold_reached:
             reason = "row_threshold"
             requested_by = "scheduler_row_threshold"
@@ -1845,6 +1886,9 @@ class PredictiveTrainerManager:
             "interval_elapsed": interval_elapsed,
             "max_staleness_reached": max_staleness_reached,
             "row_threshold_reached": row_threshold_reached,
+            "failed_run_retry_due": failed_run_retry_due,
+            "failed_retry_backoff_secs": failed_retry_backoff_secs,
+            "last_run_status": last_manifest_status or None,
             "seconds_since_last_run_started": seconds_since_last_run_started,
             "last_run_id": state.get("last_run_id"),
             "last_requested_by": state.get("last_requested_by"),

@@ -629,6 +629,77 @@ def test_reconcile_marks_running_manifest_without_lock_failed(tmp_path: Path):
     assert manifest["error"]["type"] == "StaleRunState"
 
 
+def test_reconcile_marks_running_manifest_with_stale_lock_failed(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    run_id = "run-stale-lock"
+    manager._write_manifest(
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "running",
+            "started_at": "2026-04-07T00:00:00Z",
+        },
+    )
+    manager.config.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    manager.config.lock_path.write_text(
+        json.dumps({"run_id": run_id, "started_at": "2026-04-07T00:00:00Z"}),
+        encoding="utf-8",
+    )
+
+    reconciliation = manager._reconcile_run_state()
+    manifest = manager._read_manifest(run_id)
+
+    assert reconciliation["stale_running_state"] is True
+    assert (
+        reconciliation["stale_reason"]
+        == "running_manifest_with_stale_lock_without_live_task"
+    )
+    assert manifest["status"] == "failed"
+    assert manifest["error"]["type"] == "StaleRunState"
+    assert manifest["error"]["reason"] == reconciliation["stale_reason"]
+    assert not manager.config.lock_path.exists()
+
+
+def test_scheduler_trigger_retries_failed_run_for_lagging_current_corpus(tmp_path: Path):
+    config = _make_config(tmp_path)
+    manager = PredictiveTrainerManager(config)
+    run_id = "run-failed"
+    _write_active_training_artifact(
+        config,
+        raw_shadow_entry_count=170,
+        shadow_rows=110,
+        rows=115,
+    )
+    manager._write_manifest(
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "failed",
+            "started_at": "2026-04-07T00:00:00Z",
+        },
+    )
+    manager._write_scheduler_state(
+        {
+            "last_run_id": run_id,
+            "last_requested_by": "scheduler_max_staleness",
+            "last_run_started_at": "2026-04-07T00:00:00Z",
+            "last_trigger_reason": "scheduler_max_staleness",
+            "last_trigger_shadow_entry_count": 200,
+        }
+    )
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 200)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+
+    trigger = manager._scheduler_trigger_payload()
+
+    assert trigger["should_start"] is True
+    assert trigger["requested_by"] == "scheduler_failed_run_retry"
+    assert trigger["reason"] == "failed_run_retry"
+    assert trigger["new_shadow_rows_since_effective_baseline"] == 0
+    assert trigger["failed_run_retry_due"] is True
+    assert trigger["last_run_status"] == "failed"
+
+
 def test_health_payload_reports_model_freshness_state(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     manager.config.training_path.write_text(
