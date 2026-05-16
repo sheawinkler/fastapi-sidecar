@@ -937,6 +937,44 @@ def test_status_payload_reports_active_run_stage_and_artifact_flags(tmp_path: Pa
     assert payload["active_run"]["log_paths"]["train_stdout"].endswith("train.stdout.log")
 
 
+def test_status_payload_overlays_active_run_on_cached_idle_snapshot(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager._status_snapshot_payload = manager._status_payload_base_snapshot()
+    manager._health_snapshot_payload = manager._health_payload_base_snapshot()
+    manager._snapshot_updated_monotonic = time.monotonic()
+    manager._status_snapshot_state = "fresh"
+    manager._health_snapshot_state = "fresh"
+
+    run_id = "run-cached-active"
+    manager._active_run_id = run_id
+
+    class _NeverDoneTask:
+        def done(self) -> bool:
+            return False
+
+    manager._current_task = _NeverDoneTask()
+    manager._write_manifest(
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "running",
+            "stage": "train",
+            "stage_message": "training candidate model",
+        },
+    )
+
+    status = manager.status_payload()
+    health = manager.health_payload()
+
+    assert status["status"] == "running"
+    assert status["active_run_id"] == run_id
+    assert status["active_run_stage"] == "train"
+    assert status["active_run_stage_message"] == "training candidate model"
+    assert status["model_freshness_state"] == "running_catching_up"
+    assert health["is_running"] is True
+    assert health["model_freshness_state"] == "running_catching_up"
+
+
 def test_status_payload_tolerates_missing_manifest_for_active_run(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     manager._active_run_id = "run-missing"
