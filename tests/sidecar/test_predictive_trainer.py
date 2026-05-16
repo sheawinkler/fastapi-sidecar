@@ -608,6 +608,36 @@ def test_scheduler_trigger_recovers_from_terminal_manifest_stale_task(tmp_path: 
     assert trigger["stale_reason"] == "terminal_manifest_without_lock"
 
 
+def test_reconcile_clears_terminal_manifest_stale_lock_without_live_task(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    run_id = "run-terminal-stale-lock"
+    manager._active_run_id = run_id
+    manager._write_manifest(
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "completed",
+            "started_at": "2026-04-07T00:00:00Z",
+            "completed_at": "2026-04-07T00:01:00Z",
+        },
+    )
+    manager.config.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    manager.config.lock_path.write_text(
+        json.dumps({"run_id": run_id, "started_at": "2026-04-07T00:00:00Z"}),
+        encoding="utf-8",
+    )
+
+    reconciliation = manager._reconcile_run_state()
+
+    assert reconciliation["stale_running_state"] is True
+    assert (
+        reconciliation["stale_reason"]
+        == "terminal_manifest_with_stale_lock_without_live_task"
+    )
+    assert manager._active_run_id is None
+    assert not manager.config.lock_path.exists()
+
+
 def test_reconcile_marks_running_manifest_without_lock_failed(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     run_id = "run-manifest-only"
@@ -993,6 +1023,33 @@ def test_status_payload_tolerates_missing_manifest_for_active_run(tmp_path: Path
     assert payload["active_run_stage"] is None
 
 
+def test_status_payload_does_not_overlay_terminal_active_manifest(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    run_id = "run-terminal-active"
+    manager._active_run_id = run_id
+
+    class _NeverDoneTask:
+        def done(self) -> bool:
+            return False
+
+    manager._current_task = _NeverDoneTask()
+    manager._write_manifest(
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "completed",
+            "stage": "completed",
+            "completed_at": "2026-04-07T00:01:00Z",
+        },
+    )
+
+    payload = manager.status_payload()
+
+    assert payload["status"] == "idle"
+    assert payload["active_run_id"] is None
+    assert payload["model_freshness_state"] != "running_catching_up"
+
+
 def test_run_logged_subprocess_streams_output_before_completion(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     script_path = tmp_path / "writer.py"
@@ -1039,6 +1096,34 @@ def test_run_logged_subprocess_streams_output_before_completion(tmp_path: Path):
     assert result["value"][0] == 0
     assert "stdout-end" in stdout_path.read_text(encoding="utf-8")
     assert "stderr-start" in stderr_path.read_text(encoding="utf-8")
+
+
+def test_archive_shadow_corpus_sync_returns_timeout_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager.config = replace(manager.config, shadow_archive_timeout_secs=41)
+    manager.config.archive_shadow_script_path.parent.mkdir(parents=True, exist_ok=True)
+    manager.config.archive_shadow_script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+    def _fake_run(*args, **kwargs):
+        assert kwargs["timeout"] == 41
+        raise predictive_trainer.subprocess.TimeoutExpired(
+            cmd=args[0],
+            timeout=41,
+            output="partial stdout",
+            stderr="partial stderr",
+        )
+
+    monkeypatch.setattr(predictive_trainer.subprocess, "run", _fake_run)
+
+    result = manager._archive_shadow_corpus_sync()
+
+    assert result["ok"] is False
+    assert result["reason"] == "archive_command_timeout"
+    assert result["timeout_secs"] == 41
+    assert result["stdout"] == "partial stdout"
+    assert result["stderr"] == "partial stderr"
 
 
 @pytest.mark.asyncio
@@ -1286,19 +1371,27 @@ def test_run_cycle_sync_marks_failed_stage_on_train_error(
 @pytest.mark.asyncio
 async def test_run_cycle_offloads_sync_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
-    captured: dict[str, object] = {}
+    calls: list[dict[str, object]] = []
 
     async def _fake_run_sync_on_executor(func, /, *args, **kwargs):
-        captured["func_name"] = getattr(func, "__name__", "")
-        captured["kwargs"] = kwargs
+        call = {"func_name": getattr(func, "__name__", ""), "kwargs": kwargs}
+        calls.append(call)
+        if call["func_name"] == "_maybe_archive_shadow_corpus_sync":
+            assert manager._active_run_id is None
+            assert manager._current_task is None
+            assert not manager.config.lock_path.exists()
         return None
 
     monkeypatch.setattr(manager, "_run_sync_on_executor", _fake_run_sync_on_executor)
 
     await manager._run_cycle(run_id="run-offload", requested_by="manual", auto_promote=None)
 
-    assert captured["func_name"] == "_run_cycle_sync"
-    assert captured["kwargs"]["run_id"] == "run-offload"
+    assert [call["func_name"] for call in calls] == [
+        "_run_cycle_sync",
+        "_maybe_archive_shadow_corpus_sync",
+    ]
+    assert calls[0]["kwargs"]["run_id"] == "run-offload"
+    assert calls[1]["kwargs"]["force"] is True
     assert manager._active_run_id is None
     assert manager._current_task is None
 

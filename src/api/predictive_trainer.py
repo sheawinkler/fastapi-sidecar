@@ -369,6 +369,7 @@ class PredictiveTrainerConfig:
     calibration_mae_degradation_factor: float
     p_positive_brier_degradation_factor: float
     shadow_archive_min_interval_secs: int = 3600
+    shadow_archive_timeout_secs: int = 180
 
     @property
     def runs_dir(self) -> Path:
@@ -566,6 +567,13 @@ class PredictiveTrainerConfig:
                     3600,
                 ),
             ),
+            shadow_archive_timeout_secs=max(
+                30,
+                _safe_int(
+                    os.getenv("SIDECAR_PREDICTIVE_SHADOW_ARCHIVE_TIMEOUT_SECS"),
+                    180,
+                ),
+            ),
         )
 
 
@@ -677,6 +685,7 @@ class PredictiveTrainerManager:
             "shadow_archive_min_interval_secs": int(
                 self.config.shadow_archive_min_interval_secs
             ),
+            "shadow_archive_timeout_secs": int(self.config.shadow_archive_timeout_secs),
             "shadow_archive_last_attempt_age_secs": shadow_archive_last_attempt_age_secs,
             "shadow_archive_last_attempt_ok": self._shadow_archive_last_attempt_ok,
         }
@@ -701,6 +710,7 @@ class PredictiveTrainerManager:
             "train_interval_secs": self.config.train_interval_secs,
             "scheduler_poll_secs": self.config.scheduler_poll_secs,
             "train_timeout_secs": self.config.train_timeout_secs,
+            "shadow_archive_timeout_secs": self.config.shadow_archive_timeout_secs,
             "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
             "max_staleness_secs": self.config.max_staleness_secs,
             "pending_restart": self._pending_restart,
@@ -1111,20 +1121,33 @@ class PredictiveTrainerManager:
     def _archive_shadow_corpus_sync(self) -> dict[str, Any]:
         if not self.config.archive_shadow_script_path.exists():
             return {"ok": False, "reason": "archive_script_missing"}
-        result = subprocess.run(
-            [
-                self.config.python_bin,
-                str(self.config.archive_shadow_script_path),
-                "--sqlite",
-                str(self.config.shadow_sqlite_path),
-                "--archive-root",
-                str(self.config.shadow_archive_root),
-            ],
-            cwd=self.config.algo_repo_dir,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        cmd = [
+            self.config.python_bin,
+            str(self.config.archive_shadow_script_path),
+            "--sqlite",
+            str(self.config.shadow_sqlite_path),
+            "--archive-root",
+            str(self.config.shadow_archive_root),
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=self.config.algo_repo_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=self.config.shadow_archive_timeout_secs,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            stderr = exc.stderr.decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            return {
+                "ok": False,
+                "reason": "archive_command_timeout",
+                "timeout_secs": int(self.config.shadow_archive_timeout_secs),
+                "stdout": str(stdout).strip(),
+                "stderr": str(stderr).strip(),
+            }
         if result.returncode != 0:
             return {
                 "ok": False,
@@ -1328,12 +1351,47 @@ class PredictiveTrainerManager:
             and not self._current_task.done()
             and active_manifest is not None
             and self._terminal_manifest_status(active_manifest.get("status"))
-            and not self.config.lock_path.exists()
         ):
+            stale_reason = (
+                "terminal_manifest_with_stale_lock"
+                if self.config.lock_path.exists()
+                else "terminal_manifest_without_lock"
+            )
+            with contextlib.suppress(FileNotFoundError):
+                self.config.lock_path.unlink()
             self._current_task = None
             self._active_run_id = None
             reconciliation["stale_running_state"] = True
-            reconciliation["stale_reason"] = "terminal_manifest_without_lock"
+            reconciliation["stale_reason"] = stale_reason
+
+        if self._current_task is None and self.config.lock_path.exists():
+            lock_payload: dict[str, Any] | None = None
+            with contextlib.suppress(Exception):
+                lock_payload_raw = _read_json(self.config.lock_path)
+                if isinstance(lock_payload_raw, dict):
+                    lock_payload = lock_payload_raw
+            lock_run_id = str((lock_payload or {}).get("run_id") or "").strip()
+            lock_manifest = self._read_manifest_if_exists(lock_run_id)
+            if lock_manifest is not None and self._terminal_manifest_status(
+                lock_manifest.get("status")
+            ):
+                with contextlib.suppress(FileNotFoundError):
+                    self.config.lock_path.unlink()
+                if self._active_run_id == lock_run_id:
+                    self._active_run_id = None
+                reconciliation["stale_running_state"] = True
+                reconciliation["stale_reason"] = (
+                    "terminal_manifest_with_stale_lock_without_live_task"
+                )
+                with contextlib.suppress(Exception):
+                    self._append_history(
+                        {
+                            "timestamp": _utc_iso(),
+                            "event": "trainer_run_reconciled_stale_state",
+                            "run_id": lock_run_id or None,
+                            "reason": reconciliation["stale_reason"],
+                        }
+                    )
 
         latest_manifest = self._latest_manifest_summary()
         if (
@@ -1463,6 +1521,7 @@ class PredictiveTrainerManager:
                 "auto_promote": self.config.auto_promote if auto_promote is None else bool(auto_promote),
                 "relaunch_enabled": self.config.relaunch_enabled,
                 "train_timeout_secs": self.config.train_timeout_secs,
+                "shadow_archive_timeout_secs": self.config.shadow_archive_timeout_secs,
                 "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
                 "max_staleness_secs": self.config.max_staleness_secs,
             },
@@ -1581,6 +1640,8 @@ class PredictiveTrainerManager:
             return None
         run_id = self._active_run_id
         manifest = self._read_manifest_if_exists(run_id)
+        if manifest is not None and self._terminal_manifest_status(manifest.get("status")):
+            return None
         active_run = self._manifest_for_status(run_id, manifest)
         return {
             "status": "running",
@@ -1784,11 +1845,6 @@ class PredictiveTrainerManager:
         current_shadow_entry_count = _safe_int(
             shadow_stats.get("current_shadow_entry_count"), 0
         )
-        current_shadow_corpus_last_seq = _safe_int(
-            shadow_stats.get("shadow_corpus_last_seq")
-            or shadow_stats.get("shadow_index_last_seq"),
-            0,
-        )
         shadow_index_probe_state = (
             str(shadow_stats.get("shadow_index_probe_state") or "").strip()
             or "unavailable"
@@ -1796,9 +1852,6 @@ class PredictiveTrainerManager:
         shadow_index_probe_available = shadow_index_probe_state == "available"
         active_model_raw_shadow_entry_count = _safe_int(
             active_model.get("raw_shadow_entry_count"), 0
-        )
-        active_model_shadow_corpus_last_seq = _safe_int(
-            active_model.get("shadow_corpus_last_seq"), 0
         )
         last_trigger_shadow_entry_count = _safe_int(
             state.get("last_trigger_shadow_entry_count"), current_shadow_entry_count
@@ -2468,6 +2521,7 @@ class PredictiveTrainerManager:
             return {"status": "started", "run_id": run_id}
 
     async def _run_cycle(self, *, run_id: str, requested_by: str, auto_promote: bool | None) -> None:
+        archive_after_completion = False
         try:
             await self._run_sync_on_executor(
                 self._run_cycle_sync,
@@ -2475,11 +2529,17 @@ class PredictiveTrainerManager:
                 requested_by=requested_by,
                 auto_promote=auto_promote,
             )
+            archive_after_completion = True
         finally:
             with contextlib.suppress(FileNotFoundError):
                 self.config.lock_path.unlink()
             self._active_run_id = None
             self._current_task = None
+        if archive_after_completion:
+            with contextlib.suppress(Exception):
+                await self._run_sync_on_executor(
+                    self._maybe_archive_shadow_corpus_sync, force=True
+                )
 
     def _run_cycle_sync(self, *, run_id: str, requested_by: str, auto_promote: bool | None) -> None:
         self._refresh_shadow_index_stats_cache_sync()
@@ -2862,7 +2922,6 @@ class PredictiveTrainerManager:
                     "shadow_rows": manifest["candidate_model"].get("shadow_rows"),
                 }
             )
-            self._maybe_archive_shadow_corpus_sync(force=True)
         except Exception as exc:
             manifest["status"] = "failed"
             manifest["completed_at"] = _utc_iso()
@@ -3189,6 +3248,7 @@ class PredictiveTrainerManager:
             "train_interval_secs": self.config.train_interval_secs,
             "scheduler_poll_secs": self.config.scheduler_poll_secs,
             "train_timeout_secs": self.config.train_timeout_secs,
+            "shadow_archive_timeout_secs": self.config.shadow_archive_timeout_secs,
             "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
             "max_staleness_secs": self.config.max_staleness_secs,
             "pending_restart": freshness.get("pending_restart"),
