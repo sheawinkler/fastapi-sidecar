@@ -738,6 +738,38 @@ def test_reconcile_marks_running_manifest_with_stale_lock_failed(tmp_path: Path)
     assert not manager.config.lock_path.exists()
 
 
+def test_reconcile_preserves_running_manifest_with_live_external_trainer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    run_id = "run-live-external"
+    manager._write_manifest(
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "running",
+            "started_at": "2026-04-07T00:00:00Z",
+        },
+    )
+    manager.config.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    manager.config.lock_path.write_text(
+        json.dumps({"run_id": run_id, "started_at": "2026-04-07T00:00:00Z"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(manager, "_trainer_process_alive_for_run", lambda candidate: candidate == run_id)
+
+    reconciliation = manager._reconcile_run_state()
+    manifest = manager._read_manifest(run_id)
+
+    assert reconciliation["stale_running_state"] is False
+    assert reconciliation["external_running_state"] is True
+    assert reconciliation["stale_reason"] == "running_manifest_has_live_trainer_process"
+    assert manager._active_run_id == run_id
+    assert manager.is_running() is True
+    assert manifest["status"] == "running"
+    assert manager.config.lock_path.exists()
+
+
 def test_scheduler_trigger_retries_failed_run_for_lagging_current_corpus(tmp_path: Path):
     config = _make_config(tmp_path)
     manager = PredictiveTrainerManager(config)
@@ -1049,8 +1081,12 @@ def test_status_payload_overlays_active_run_on_cached_idle_snapshot(tmp_path: Pa
     assert status["active_run_stage"] == "train"
     assert status["active_run_stage_message"] == "training candidate model"
     assert status["model_freshness_state"] == "running_catching_up"
+    assert status["scheduler_trigger"]["should_start"] is False
+    assert status["scheduler_trigger"]["reason"] == "already_running"
     assert health["is_running"] is True
     assert health["model_freshness_state"] == "running_catching_up"
+    assert health["scheduler_trigger"]["should_start"] is False
+    assert health["scheduler_trigger"]["reason"] == "already_running"
 
 
 def test_status_payload_tolerates_missing_manifest_for_active_run(tmp_path: Path):
@@ -1144,6 +1180,51 @@ def test_run_logged_subprocess_streams_output_before_completion(tmp_path: Path):
     assert result["value"][0] == 0
     assert "stdout-end" in stdout_path.read_text(encoding="utf-8")
     assert "stderr-start" in stderr_path.read_text(encoding="utf-8")
+
+
+def test_terminate_active_subprocess_stops_logged_subprocess(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    script_path = tmp_path / "sleeper.py"
+    script_path.write_text(
+        "\n".join(
+            [
+                "import time",
+                "print('started', flush=True)",
+                "time.sleep(30)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stdout_path = tmp_path / "terminate.stdout.log"
+    stderr_path = tmp_path / "terminate.stderr.log"
+    result: dict[str, object] = {}
+
+    def _target() -> None:
+        result["value"] = manager._run_logged_subprocess(
+            cmd=[sys.executable, str(script_path)],
+            cwd=tmp_path,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            timeout=None,
+        )
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        if manager._active_subprocess is not None:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("subprocess did not start")
+
+    manager._terminate_active_subprocess(reason="test")
+
+    thread.join(timeout=3.0)
+    assert thread.is_alive() is False
+    assert result["value"][0] != 0
+    assert manager._active_subprocess is None
 
 
 def test_archive_shadow_corpus_sync_returns_timeout_result(

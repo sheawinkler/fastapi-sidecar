@@ -641,6 +641,7 @@ class PredictiveTrainerManager:
         self._state_io_lock = threading.RLock()
         self._current_task: asyncio.Task | None = None
         self._active_run_id: str | None = None
+        self._active_subprocess: Any | None = None
         self._scheduler_task: asyncio.Task | None = None
         self._pending_restart: dict[str, Any] | None = None
         self._scheduler_cycle_ok_count = 0
@@ -1304,6 +1305,7 @@ class PredictiveTrainerManager:
                 await self._scheduler_task
             self._scheduler_task = None
         if self._current_task:
+            self._terminate_active_subprocess(reason="sidecar_shutdown")
             active_manifest = self._read_manifest_if_exists(self._active_run_id)
             if (
                 self._active_run_id
@@ -1386,7 +1388,17 @@ class PredictiveTrainerManager:
             await asyncio.sleep(self.config.scheduler_poll_secs)
 
     def is_running(self) -> bool:
-        return self._current_task is not None and not self._current_task.done()
+        if self._current_task is not None and not self._current_task.done():
+            return True
+        if not self._active_run_id:
+            return False
+        active_manifest = self._read_manifest_if_exists(self._active_run_id)
+        if (
+            active_manifest is None
+            or str(active_manifest.get("status") or "").strip().lower() != "running"
+        ):
+            return False
+        return self._trainer_process_alive_for_run(self._active_run_id)
 
     def _terminal_manifest_status(self, status: Any) -> bool:
         return str(status or "").strip().lower() in {"completed", "failed", "cancelled"}
@@ -1476,6 +1488,11 @@ class PredictiveTrainerManager:
                         lock_payload = lock_payload_raw
             lock_run_id = str((lock_payload or {}).get("run_id") or "").strip()
             if lock_run_id and latest_run_id and lock_run_id != latest_run_id:
+                return reconciliation
+            if latest_run_id and self._trainer_process_alive_for_run(latest_run_id):
+                self._active_run_id = latest_run_id
+                reconciliation["external_running_state"] = True
+                reconciliation["stale_reason"] = "running_manifest_has_live_trainer_process"
                 return reconciliation
             stale_reason = (
                 "running_manifest_with_stale_lock_without_live_task"
@@ -1728,6 +1745,13 @@ class PredictiveTrainerManager:
             "model_freshness_state": "running_catching_up",
         }
 
+    def _suppress_scheduler_trigger_while_running(self, payload: dict[str, Any]) -> None:
+        trigger = dict(payload.get("scheduler_trigger") or {})
+        trigger["should_start"] = False
+        trigger["requested_by"] = None
+        trigger["reason"] = "already_running"
+        payload["scheduler_trigger"] = trigger
+
     def _run_logged_subprocess(
         self,
         *,
@@ -1753,19 +1777,35 @@ class PredictiveTrainerManager:
         with stdout_path.open("w", encoding="utf-8", buffering=1) as stdout_fh, stderr_path.open(
             "w", encoding="utf-8", buffering=1
         ) as stderr_fh:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 cmd,
                 cwd=cwd,
-                check=False,
                 stdout=stdout_fh,
                 stderr=stderr_fh,
                 text=True,
-                timeout=timeout,
                 env=env,
             )
+            with self._state_io_lock:
+                self._active_subprocess = process
+            started_monotonic = time.monotonic()
+            try:
+                while True:
+                    returncode = process.poll()
+                    if returncode is not None:
+                        break
+                    if timeout is not None and (time.monotonic() - started_monotonic) >= timeout:
+                        process.kill()
+                        with contextlib.suppress(Exception):
+                            process.wait(timeout=5)
+                        raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+                    time.sleep(0.25)
+            finally:
+                with self._state_io_lock:
+                    if self._active_subprocess is process:
+                        self._active_subprocess = None
         stdout_text = stdout_path.read_text(encoding="utf-8") if stdout_path.exists() else ""
         stderr_text = stderr_path.read_text(encoding="utf-8") if stderr_path.exists() else ""
-        return completed.returncode, stdout_text, stderr_text
+        return returncode, stdout_text, stderr_text
 
     def _python_cmd(self, script_path: Path, *args: str) -> list[str]:
         return [self.config.python_bin, "-u", str(script_path), *args]
@@ -1812,6 +1852,72 @@ class PredictiveTrainerManager:
         if not cmd:
             return False
         return all(token in cmd for token in required_tokens)
+
+    def _trainer_process_alive_for_run(self, run_id: str | None) -> bool:
+        run_id_text = str(run_id or "").strip()
+        if not run_id_text:
+            return False
+        run_fragment = f"/{run_id_text}/"
+        model_fragment = f"/{run_id_text}/model_candidate.json"
+        try:
+            probe = subprocess.run(
+                ["ps", "-axo", "pid=,command="],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+        except Exception:
+            return False
+        if probe.returncode != 0:
+            return False
+        for line in (probe.stdout or "").splitlines():
+            if "train_predictive_entry_model.py" not in line:
+                continue
+            if model_fragment in line or run_fragment in line:
+                return True
+        return False
+
+    def _terminate_active_subprocess(self, *, reason: str) -> None:
+        with self._state_io_lock:
+            process = self._active_subprocess
+        if process is None:
+            return
+        poll = getattr(process, "poll", None)
+        if not callable(poll):
+            return
+        try:
+            if poll() is not None:
+                return
+            terminate = getattr(process, "terminate", None)
+            if callable(terminate):
+                terminate()
+            wait = getattr(process, "wait", None)
+            if callable(wait):
+                try:
+                    wait(timeout=10)
+                    return
+                except subprocess.TimeoutExpired:
+                    pass
+            kill = getattr(process, "kill", None)
+            if callable(kill):
+                kill()
+            if callable(wait):
+                with contextlib.suppress(Exception):
+                    wait(timeout=5)
+        finally:
+            with self._state_io_lock:
+                if self._active_subprocess is process:
+                    self._active_subprocess = None
+            with contextlib.suppress(Exception):
+                self._append_history(
+                    {
+                        "timestamp": _utc_iso(),
+                        "event": "trainer_subprocess_terminated",
+                        "reason": reason,
+                        "pid": getattr(process, "pid", None),
+                    }
+                )
 
     def _active_live_trader_pid(self) -> int | None:
         pid_path = self.config.algo_repo_dir / "logs/real_algotrader_live.pid"
@@ -3382,6 +3488,7 @@ class PredictiveTrainerManager:
         if active_overlay:
             payload["is_running"] = True
             payload["model_freshness_state"] = "running_catching_up"
+            self._suppress_scheduler_trigger_while_running(payload)
         payload.update(
             self._snapshot_metadata(
                 state=self._health_snapshot_state,
@@ -3396,6 +3503,7 @@ class PredictiveTrainerManager:
         active_overlay = self._active_run_status_overlay()
         if active_overlay:
             payload.update(active_overlay)
+            self._suppress_scheduler_trigger_while_running(payload)
         payload.update(
             self._snapshot_metadata(
                 state=self._status_snapshot_state,
