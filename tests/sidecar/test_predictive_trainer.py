@@ -149,6 +149,19 @@ def test_from_env_accepts_numeric_truthy_flags(tmp_path: Path, monkeypatch: pyte
     assert config.shadow_snapshot_tmpdir == (tmp_path / "shadow_snapshots").resolve()
 
 
+def test_from_env_can_disable_shadow_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    algo_repo = tmp_path / "algo"
+    algo_repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_ALGO_REPO_DIR", str(algo_repo))
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_SHADOW_ARCHIVE_ENABLED", "false")
+
+    config = PredictiveTrainerConfig.from_env(tmp_path / "data")
+
+    assert config.shadow_archive_enabled is False
+
+
 def test_from_env_allows_disabling_train_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1159,6 +1172,33 @@ def test_archive_shadow_corpus_sync_returns_timeout_result(
     assert result["timeout_secs"] == 41
     assert result["stdout"] == "partial stdout"
     assert result["stderr"] == "partial stderr"
+
+
+def test_archive_shadow_corpus_sync_skips_when_disabled(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager.config = replace(manager.config, shadow_archive_enabled=False)
+
+    result = manager._archive_shadow_corpus_sync()
+
+    assert result == {"ok": False, "reason": "archive_disabled"}
+
+
+def test_maybe_archive_shadow_corpus_sync_skips_when_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager.config = replace(manager.config, shadow_archive_enabled=False)
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 10000)
+
+    def _unexpected_archive() -> dict[str, object]:
+        raise AssertionError("archive should not run when disabled")
+
+    monkeypatch.setattr(manager, "_archive_shadow_corpus_sync", _unexpected_archive)
+
+    result = manager._maybe_archive_shadow_corpus_sync(force=True)
+
+    assert result is None
+    assert manager._shadow_archive_last_attempt_monotonic is None
 
 
 @pytest.mark.asyncio
