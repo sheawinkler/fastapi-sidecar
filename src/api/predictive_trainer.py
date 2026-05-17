@@ -414,6 +414,7 @@ class PredictiveTrainerConfig:
     p_positive_brier_degradation_factor: float
     shadow_max_raw_entries: int | None
     shadow_snapshot_tmpdir: Path | None
+    shadow_archive_enabled: bool = True
     shadow_archive_min_interval_secs: int = 3600
     shadow_archive_timeout_secs: int = 180
 
@@ -612,6 +613,10 @@ class PredictiveTrainerConfig:
                 "SIDECAR_PREDICTIVE_SHADOW_SNAPSHOT_TMPDIR",
                 "PREDICTIVE_SHADOW_SNAPSHOT_TMPDIR",
             ),
+            shadow_archive_enabled=_env_bool(
+                "SIDECAR_PREDICTIVE_SHADOW_ARCHIVE_ENABLED",
+                _env_bool("PREDICTIVE_SHADOW_ARCHIVE_ENABLED", True),
+            ),
             shadow_archive_min_interval_secs=max(
                 60,
                 _safe_int(
@@ -737,6 +742,7 @@ class PredictiveTrainerManager:
             "shadow_archive_min_interval_secs": int(
                 self.config.shadow_archive_min_interval_secs
             ),
+            "shadow_archive_enabled": bool(self.config.shadow_archive_enabled),
             "shadow_archive_timeout_secs": int(self.config.shadow_archive_timeout_secs),
             "shadow_archive_last_attempt_age_secs": shadow_archive_last_attempt_age_secs,
             "shadow_archive_last_attempt_ok": self._shadow_archive_last_attempt_ok,
@@ -766,6 +772,7 @@ class PredictiveTrainerManager:
             "shadow_snapshot_tmpdir": str(self.config.shadow_snapshot_tmpdir)
             if self.config.shadow_snapshot_tmpdir is not None
             else None,
+            "shadow_archive_enabled": self.config.shadow_archive_enabled,
             "shadow_archive_timeout_secs": self.config.shadow_archive_timeout_secs,
             "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
             "max_staleness_secs": self.config.max_staleness_secs,
@@ -795,6 +802,7 @@ class PredictiveTrainerManager:
             "shadow_index_legacy_path": str(self.config.shadow_index_path),
             "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
             "shadow_archive_root": str(self.config.shadow_archive_root),
+            "shadow_archive_enabled": self.config.shadow_archive_enabled,
             "scheduler_runtime": self._scheduler_runtime_payload(),
             "scheduler_trigger": {
                 "should_start": False,
@@ -1175,6 +1183,8 @@ class PredictiveTrainerManager:
         }
 
     def _archive_shadow_corpus_sync(self) -> dict[str, Any]:
+        if not self.config.shadow_archive_enabled:
+            return {"ok": False, "reason": "archive_disabled"}
         if not self.config.archive_shadow_script_path.exists():
             return {"ok": False, "reason": "archive_script_missing"}
         cmd = [
@@ -1219,6 +1229,8 @@ class PredictiveTrainerManager:
         return payload if isinstance(payload, dict) else {"ok": False, "reason": "archive_invalid_payload"}
 
     def _maybe_archive_shadow_corpus_sync(self, *, force: bool = False) -> dict[str, Any] | None:
+        if not self.config.shadow_archive_enabled:
+            return None
         if not force:
             last_attempt = self._shadow_archive_last_attempt_monotonic
             if last_attempt is not None:
@@ -1581,6 +1593,7 @@ class PredictiveTrainerManager:
                 "shadow_snapshot_tmpdir": str(self.config.shadow_snapshot_tmpdir)
                 if self.config.shadow_snapshot_tmpdir is not None
                 else None,
+                "shadow_archive_enabled": self.config.shadow_archive_enabled,
                 "shadow_archive_timeout_secs": self.config.shadow_archive_timeout_secs,
                 "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
                 "max_staleness_secs": self.config.max_staleness_secs,
@@ -3325,6 +3338,7 @@ class PredictiveTrainerManager:
             "shadow_snapshot_tmpdir": str(self.config.shadow_snapshot_tmpdir)
             if self.config.shadow_snapshot_tmpdir is not None
             else None,
+            "shadow_archive_enabled": self.config.shadow_archive_enabled,
             "shadow_archive_timeout_secs": self.config.shadow_archive_timeout_secs,
             "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
             "max_staleness_secs": self.config.max_staleness_secs,
@@ -3355,6 +3369,7 @@ class PredictiveTrainerManager:
             "shadow_index_legacy_path": str(self.config.shadow_index_path),
             "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
             "shadow_archive_root": str(self.config.shadow_archive_root),
+            "shadow_archive_enabled": self.config.shadow_archive_enabled,
             "scheduler_runtime": self._scheduler_runtime_payload(),
             "scheduler_trigger": self._scheduler_trigger_payload(),
             **freshness,
