@@ -44,6 +44,21 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _parse_optional_timeout_secs(value: Any, default: int | None) -> int | None:
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    if text in {"0", "-1", "none", "null", "disabled", "disable", "off", "false"}:
+        return None
+    try:
+        parsed = int(float(text))
+    except Exception:
+        return default
+    if parsed <= 0:
+        return None
+    return max(300, parsed)
+
+
 def _safe_float(value: Any, default: float | None = None) -> float | None:
     try:
         return float(value)
@@ -391,7 +406,7 @@ class PredictiveTrainerConfig:
     auto_promote: bool
     relaunch_enabled: bool
     python_bin: str
-    train_timeout_secs: int
+    train_timeout_secs: int | None
     min_new_shadow_rows_to_trigger: int
     max_staleness_secs: int
     positive_share_collapse_tolerance: float
@@ -546,8 +561,9 @@ class PredictiveTrainerConfig:
                 os.getenv("SIDECAR_PREDICTIVE_TRAINER_PYTHON", sys.executable)
             ).strip()
             or sys.executable,
-            train_timeout_secs=max(
-                300, _safe_int(os.getenv("SIDECAR_PREDICTIVE_TRAINER_TIMEOUT_SECS"), 1800)
+            train_timeout_secs=_parse_optional_timeout_secs(
+                os.getenv("SIDECAR_PREDICTIVE_TRAINER_TIMEOUT_SECS"),
+                1800,
             ),
             min_new_shadow_rows_to_trigger=max(
                 1,

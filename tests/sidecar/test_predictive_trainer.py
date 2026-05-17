@@ -149,6 +149,32 @@ def test_from_env_accepts_numeric_truthy_flags(tmp_path: Path, monkeypatch: pyte
     assert config.shadow_snapshot_tmpdir == (tmp_path / "shadow_snapshots").resolve()
 
 
+def test_from_env_allows_disabling_train_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    algo_repo = tmp_path / "algo"
+    algo_repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_ALGO_REPO_DIR", str(algo_repo))
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_TIMEOUT_SECS", "0")
+
+    config = PredictiveTrainerConfig.from_env(tmp_path / "data")
+
+    assert config.train_timeout_secs is None
+
+
+def test_from_env_enforces_minimum_positive_train_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    algo_repo = tmp_path / "algo"
+    algo_repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_ALGO_REPO_DIR", str(algo_repo))
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_TIMEOUT_SECS", "12")
+
+    config = PredictiveTrainerConfig.from_env(tmp_path / "data")
+
+    assert config.train_timeout_secs == 300
+
+
 def test_from_env_defaults_scheduler_enabled_when_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     algo_repo = tmp_path / "algo"
     algo_repo.mkdir(parents=True, exist_ok=True)
