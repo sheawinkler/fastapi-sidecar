@@ -25,6 +25,7 @@ PREDICTIVE_CANDIDATE_FIREHOSE_STATS_TABLE = (
     "predictive_candidate_firehose_shadow_outcomes_stats"
 )
 SHADOW_CORPUS_FAMILY_ID = "predictive_candidate_firehose:raw_shadow:v1"
+DEFAULT_SHADOW_MAX_RAW_ENTRIES = 1_000
 
 
 def _utc_now() -> datetime:
@@ -48,6 +49,34 @@ def _safe_float(value: Any, default: float | None = None) -> float | None:
         return float(value)
     except Exception:
         return default
+
+
+def _parse_shadow_max_raw_entries(value: Any) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return DEFAULT_SHADOW_MAX_RAW_ENTRIES
+    try:
+        parsed = int(float(text))
+    except Exception:
+        return DEFAULT_SHADOW_MAX_RAW_ENTRIES
+    if parsed <= 0:
+        return None
+    return parsed
+
+
+def _env_shadow_max_raw_entries() -> int | None:
+    raw = os.getenv("SIDECAR_PREDICTIVE_TRAINER_SHADOW_MAX_RAW_ENTRIES")
+    if raw is None:
+        raw = os.getenv("PREDICTIVE_TRAIN_SHADOW_MAX_RAW_ENTRIES")
+    return _parse_shadow_max_raw_entries(raw)
+
+
+def _env_optional_path(*names: str) -> Path | None:
+    for name in names:
+        raw = str(os.getenv(name) or "").strip()
+        if raw:
+            return Path(raw).expanduser().resolve()
+    return None
 
 
 def _resolved_shadow_corpus_family_id(value: Any, *, has_shadow_history: bool) -> str | None:
@@ -368,6 +397,8 @@ class PredictiveTrainerConfig:
     positive_share_collapse_tolerance: float
     calibration_mae_degradation_factor: float
     p_positive_brier_degradation_factor: float
+    shadow_max_raw_entries: int | None
+    shadow_snapshot_tmpdir: Path | None
     shadow_archive_min_interval_secs: int = 3600
     shadow_archive_timeout_secs: int = 180
 
@@ -560,6 +591,11 @@ class PredictiveTrainerConfig:
                 )
                 or 1.25,
             ),
+            shadow_max_raw_entries=_env_shadow_max_raw_entries(),
+            shadow_snapshot_tmpdir=_env_optional_path(
+                "SIDECAR_PREDICTIVE_SHADOW_SNAPSHOT_TMPDIR",
+                "PREDICTIVE_SHADOW_SNAPSHOT_TMPDIR",
+            ),
             shadow_archive_min_interval_secs=max(
                 60,
                 _safe_int(
@@ -710,6 +746,10 @@ class PredictiveTrainerManager:
             "train_interval_secs": self.config.train_interval_secs,
             "scheduler_poll_secs": self.config.scheduler_poll_secs,
             "train_timeout_secs": self.config.train_timeout_secs,
+            "shadow_max_raw_entries": self.config.shadow_max_raw_entries,
+            "shadow_snapshot_tmpdir": str(self.config.shadow_snapshot_tmpdir)
+            if self.config.shadow_snapshot_tmpdir is not None
+            else None,
             "shadow_archive_timeout_secs": self.config.shadow_archive_timeout_secs,
             "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
             "max_staleness_secs": self.config.max_staleness_secs,
@@ -1521,6 +1561,10 @@ class PredictiveTrainerManager:
                 "auto_promote": self.config.auto_promote if auto_promote is None else bool(auto_promote),
                 "relaunch_enabled": self.config.relaunch_enabled,
                 "train_timeout_secs": self.config.train_timeout_secs,
+                "shadow_max_raw_entries": self.config.shadow_max_raw_entries,
+                "shadow_snapshot_tmpdir": str(self.config.shadow_snapshot_tmpdir)
+                if self.config.shadow_snapshot_tmpdir is not None
+                else None,
                 "shadow_archive_timeout_secs": self.config.shadow_archive_timeout_secs,
                 "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
                 "max_staleness_secs": self.config.max_staleness_secs,
@@ -1668,6 +1712,15 @@ class PredictiveTrainerManager:
         stderr_path.parent.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
+        env["PREDICTIVE_TRAIN_SHADOW_MAX_RAW_ENTRIES"] = (
+            "0"
+            if self.config.shadow_max_raw_entries is None
+            else str(self.config.shadow_max_raw_entries)
+        )
+        if self.config.shadow_snapshot_tmpdir is not None:
+            env["PREDICTIVE_SHADOW_SNAPSHOT_TMPDIR"] = str(
+                self.config.shadow_snapshot_tmpdir
+            )
         with stdout_path.open("w", encoding="utf-8", buffering=1) as stdout_fh, stderr_path.open(
             "w", encoding="utf-8", buffering=1
         ) as stderr_fh:
@@ -2659,6 +2712,10 @@ class PredictiveTrainerManager:
                 str(model_candidate),
                 "--shadow-index",
                 str(self.config.shadow_sqlite_path),
+                "--shadow-max-raw-entries",
+                "0"
+                if self.config.shadow_max_raw_entries is None
+                else str(self.config.shadow_max_raw_entries),
             )
             train_returncode, train_stdout, train_stderr = self._run_logged_subprocess(
                 cmd=train_cmd,
@@ -3248,6 +3305,10 @@ class PredictiveTrainerManager:
             "train_interval_secs": self.config.train_interval_secs,
             "scheduler_poll_secs": self.config.scheduler_poll_secs,
             "train_timeout_secs": self.config.train_timeout_secs,
+            "shadow_max_raw_entries": self.config.shadow_max_raw_entries,
+            "shadow_snapshot_tmpdir": str(self.config.shadow_snapshot_tmpdir)
+            if self.config.shadow_snapshot_tmpdir is not None
+            else None,
             "shadow_archive_timeout_secs": self.config.shadow_archive_timeout_secs,
             "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
             "max_staleness_secs": self.config.max_staleness_secs,

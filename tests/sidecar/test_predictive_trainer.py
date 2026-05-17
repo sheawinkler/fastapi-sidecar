@@ -116,6 +116,8 @@ def _make_config(tmp_path: Path) -> PredictiveTrainerConfig:
         positive_share_collapse_tolerance=0.05,
         calibration_mae_degradation_factor=1.25,
         p_positive_brier_degradation_factor=1.25,
+        shadow_max_raw_entries=1000,
+        shadow_snapshot_tmpdir=tmp_path / "shadow_snapshots",
     )
 
 
@@ -128,6 +130,11 @@ def test_from_env_accepts_numeric_truthy_flags(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_RELAUNCH_ENABLED", "on")
     monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_POLL_SECS", "45")
     monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_MIN_NEW_SHADOW_ROWS", "125")
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_SHADOW_MAX_RAW_ENTRIES", "0")
+    monkeypatch.setenv(
+        "SIDECAR_PREDICTIVE_SHADOW_SNAPSHOT_TMPDIR",
+        str(tmp_path / "shadow_snapshots"),
+    )
 
     config = PredictiveTrainerConfig.from_env(tmp_path / "data")
 
@@ -138,6 +145,8 @@ def test_from_env_accepts_numeric_truthy_flags(tmp_path: Path, monkeypatch: pyte
     assert config.relaunch_enabled is True
     assert config.scheduler_poll_secs == 45
     assert config.min_new_shadow_rows_to_trigger == 125
+    assert config.shadow_max_raw_entries is None
+    assert config.shadow_snapshot_tmpdir == (tmp_path / "shadow_snapshots").resolve()
 
 
 def test_from_env_defaults_scheduler_enabled_when_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -1223,6 +1232,7 @@ def test_run_cycle_sync_records_stage_progress_and_promotion_record(
             )
             return 0, '{"ok": true}', ""
         if script_name == "train_predictive_entry_model.py":
+            assert cmd[cmd.index("--shadow-max-raw-entries") + 1] == "1000"
             output_path = Path(cmd[cmd.index("--output") + 1])
             output_path.write_text(
                 json.dumps(
@@ -1348,6 +1358,7 @@ def test_run_cycle_sync_marks_failed_stage_on_train_error(
             )
             return 0, '{"ok": true}', ""
         if script_name == "train_predictive_entry_model.py":
+            assert cmd[cmd.index("--shadow-max-raw-entries") + 1] == "1000"
             return (
                 7,
                 '{"kind":"trainer_progress","stage":"shadow_snapshot_start"}\n',
