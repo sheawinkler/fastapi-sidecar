@@ -417,6 +417,7 @@ class PredictiveTrainerConfig:
     shadow_archive_enabled: bool = True
     shadow_archive_min_interval_secs: int = 3600
     shadow_archive_timeout_secs: int = 180
+    stale_running_grace_secs: int = 3600
 
     @property
     def runs_dir(self) -> Path:
@@ -631,6 +632,13 @@ class PredictiveTrainerConfig:
                     180,
                 ),
             ),
+            stale_running_grace_secs=max(
+                300,
+                _safe_int(
+                    os.getenv("SIDECAR_PREDICTIVE_TRAINER_STALE_RUNNING_GRACE_SECS"),
+                    3600,
+                ),
+            ),
         )
 
 
@@ -745,6 +753,7 @@ class PredictiveTrainerManager:
             ),
             "shadow_archive_enabled": bool(self.config.shadow_archive_enabled),
             "shadow_archive_timeout_secs": int(self.config.shadow_archive_timeout_secs),
+            "stale_running_grace_secs": int(self.config.stale_running_grace_secs),
             "shadow_archive_last_attempt_age_secs": shadow_archive_last_attempt_age_secs,
             "shadow_archive_last_attempt_ok": self._shadow_archive_last_attempt_ok,
         }
@@ -775,6 +784,7 @@ class PredictiveTrainerManager:
             else None,
             "shadow_archive_enabled": self.config.shadow_archive_enabled,
             "shadow_archive_timeout_secs": self.config.shadow_archive_timeout_secs,
+            "stale_running_grace_secs": self.config.stale_running_grace_secs,
             "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
             "max_staleness_secs": self.config.max_staleness_secs,
             "pending_restart": self._pending_restart,
@@ -796,6 +806,7 @@ class PredictiveTrainerManager:
             "active_run_stage_started_at": None,
             "active_run_stage_updated_at": None,
             "active_run_stage_message": None,
+            "stale_running_grace_secs": self.config.stale_running_grace_secs,
             "pending_restart": self._pending_restart,
             "active_model": self._active_artifacts(),
             "latest_run_context": self._latest_run_context_path(),
@@ -1398,7 +1409,12 @@ class PredictiveTrainerManager:
             or str(active_manifest.get("status") or "").strip().lower() != "running"
         ):
             return False
-        return self._trainer_process_alive_for_run(self._active_run_id)
+        if self._trainer_process_alive_for_run(self._active_run_id):
+            return True
+        return self._running_manifest_recovery_hold(
+            self._active_run_id,
+            active_manifest,
+        ) is not None
 
     def _terminal_manifest_status(self, status: Any) -> bool:
         return str(status or "").strip().lower() in {"completed", "failed", "cancelled"}
@@ -1493,6 +1509,16 @@ class PredictiveTrainerManager:
                 self._active_run_id = latest_run_id
                 reconciliation["external_running_state"] = True
                 reconciliation["stale_reason"] = "running_manifest_has_live_trainer_process"
+                return reconciliation
+            recovery_hold = self._running_manifest_recovery_hold(
+                latest_run_id,
+                latest_manifest,
+            )
+            if recovery_hold is not None:
+                self._active_run_id = latest_run_id
+                reconciliation["external_running_state"] = True
+                reconciliation["stale_reason"] = recovery_hold["reason"]
+                reconciliation["stale_running_recovery_hold"] = recovery_hold
                 return reconciliation
             stale_reason = (
                 "running_manifest_with_stale_lock_without_live_task"
@@ -1612,6 +1638,7 @@ class PredictiveTrainerManager:
                 else None,
                 "shadow_archive_enabled": self.config.shadow_archive_enabled,
                 "shadow_archive_timeout_secs": self.config.shadow_archive_timeout_secs,
+                "stale_running_grace_secs": self.config.stale_running_grace_secs,
                 "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
                 "max_staleness_secs": self.config.max_staleness_secs,
             },
@@ -1689,6 +1716,66 @@ class PredictiveTrainerManager:
             "calibration_candidate_exists": _path_exists_text(paths["calibration_candidate"]),
             "eval_pack_exists": _path_exists_text(paths["eval_pack_json"]),
             "promotion_record_exists": _path_exists_text(paths["promotion_record"]),
+        }
+
+    def _running_manifest_activity(
+        self,
+        run_id: str,
+        manifest: dict[str, Any],
+    ) -> tuple[datetime, str] | None:
+        candidates: list[tuple[datetime, str]] = []
+        for key in ("stage_updated_at", "stage_started_at", "started_at"):
+            parsed = _parse_utc_ts(str(manifest.get(key) or "").strip() or None)
+            if parsed is not None:
+                candidates.append((parsed, key))
+
+        for artifact_name, artifact_path in self._run_artifact_paths(run_id).items():
+            if not artifact_path.exists():
+                continue
+            with contextlib.suppress(Exception):
+                candidates.append(
+                    (
+                        datetime.fromtimestamp(artifact_path.stat().st_mtime, timezone.utc),
+                        f"artifact:{artifact_name}",
+                    )
+                )
+
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item[0])
+
+    def _running_manifest_recovery_hold(
+        self,
+        run_id: str | None,
+        manifest: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        run_id_text = str(run_id or "").strip()
+        if not run_id_text or manifest is None:
+            return None
+        if str(manifest.get("status") or "").strip().lower() != "running":
+            return None
+        grace_secs = max(0, int(self.config.stale_running_grace_secs))
+        if grace_secs <= 0:
+            return None
+        activity = self._running_manifest_activity(run_id_text, manifest)
+        if activity is None:
+            return None
+        latest_activity_at, latest_activity_source = activity
+        age_secs = max(0.0, (_utc_now() - latest_activity_at).total_seconds())
+        if age_secs > grace_secs:
+            return None
+        reason = (
+            "running_manifest_has_recent_artifact_progress"
+            if latest_activity_source.startswith("artifact:")
+            else "running_manifest_within_stale_grace"
+        )
+        return {
+            "run_id": run_id_text,
+            "reason": reason,
+            "latest_activity_at": _utc_iso(latest_activity_at),
+            "latest_activity_source": latest_activity_source,
+            "latest_activity_age_secs": age_secs,
+            "stale_running_grace_secs": grace_secs,
         }
 
     def _update_manifest_stage(
@@ -1859,6 +1946,14 @@ class PredictiveTrainerManager:
             return False
         run_fragment = f"/{run_id_text}/"
         model_fragment = f"/{run_id_text}/model_candidate.json"
+        trainer_tokens = {
+            "build_mc_dataset.py",
+            "train_predictive_entry_model.py",
+            "update_predictive_next_state_ledger.py",
+            "report_model_eval_pack.py",
+            "analyze_expectancy_from_log.py",
+            "deploy_live.sh",
+        }
         try:
             probe = subprocess.run(
                 ["ps", "-axo", "pid=,command="],
@@ -1872,7 +1967,7 @@ class PredictiveTrainerManager:
         if probe.returncode != 0:
             return False
         for line in (probe.stdout or "").splitlines():
-            if "train_predictive_entry_model.py" not in line:
+            if not any(token in line for token in trainer_tokens):
                 continue
             if model_fragment in line or run_fragment in line:
                 return True
@@ -2142,6 +2237,7 @@ class PredictiveTrainerManager:
             "active_model_covers_current_same_family": active_model_covers_current_same_family,
             "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
             "max_staleness_secs": self.config.max_staleness_secs,
+            "stale_running_grace_secs": self.config.stale_running_grace_secs,
             "interval_elapsed": interval_elapsed,
             "max_staleness_reached": max_staleness_reached,
             "row_threshold_reached": row_threshold_reached,
@@ -3446,6 +3542,7 @@ class PredictiveTrainerManager:
             else None,
             "shadow_archive_enabled": self.config.shadow_archive_enabled,
             "shadow_archive_timeout_secs": self.config.shadow_archive_timeout_secs,
+            "stale_running_grace_secs": self.config.stale_running_grace_secs,
             "min_new_shadow_rows_to_trigger": self.config.min_new_shadow_rows_to_trigger,
             "max_staleness_secs": self.config.max_staleness_secs,
             "pending_restart": freshness.get("pending_restart"),
@@ -3476,6 +3573,7 @@ class PredictiveTrainerManager:
             "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
             "shadow_archive_root": str(self.config.shadow_archive_root),
             "shadow_archive_enabled": self.config.shadow_archive_enabled,
+            "stale_running_grace_secs": self.config.stale_running_grace_secs,
             "scheduler_runtime": self._scheduler_runtime_payload(),
             "scheduler_trigger": self._scheduler_trigger_payload(),
             **freshness,

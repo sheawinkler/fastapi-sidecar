@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import errno
 import json
+import os
 import sqlite3
 import sys
 import threading
@@ -113,6 +114,7 @@ def _make_config(tmp_path: Path) -> PredictiveTrainerConfig:
         train_timeout_secs=1800,
         min_new_shadow_rows_to_trigger=100,
         max_staleness_secs=3600,
+        stale_running_grace_secs=3600,
         positive_share_collapse_tolerance=0.05,
         calibration_mae_degradation_factor=1.25,
         p_positive_brier_degradation_factor=1.25,
@@ -186,6 +188,19 @@ def test_from_env_enforces_minimum_positive_train_timeout(
     config = PredictiveTrainerConfig.from_env(tmp_path / "data")
 
     assert config.train_timeout_secs == 300
+
+
+def test_from_env_enforces_minimum_stale_running_grace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    algo_repo = tmp_path / "algo"
+    algo_repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_ALGO_REPO_DIR", str(algo_repo))
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_STALE_RUNNING_GRACE_SECS", "12")
+
+    config = PredictiveTrainerConfig.from_env(tmp_path / "data")
+
+    assert config.stale_running_grace_secs == 300
 
 
 def test_from_env_defaults_scheduler_enabled_when_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -768,6 +783,113 @@ def test_reconcile_preserves_running_manifest_with_live_external_trainer(
     assert manager.is_running() is True
     assert manifest["status"] == "running"
     assert manager.config.lock_path.exists()
+
+
+def test_reconcile_holds_recent_artifact_progress_instead_of_failing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(
+        replace(_make_config(tmp_path), stale_running_grace_secs=3600)
+    )
+    run_id = "run-recent-artifact"
+    manager._write_manifest(
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "running",
+            "started_at": "2026-04-07T00:00:00Z",
+            "stage": "train",
+            "stage_updated_at": "2026-04-07T00:00:00Z",
+        },
+    )
+    run_dir = manager._run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "model_candidate.json").write_text("{}", encoding="utf-8")
+    manager.config.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    manager.config.lock_path.write_text(
+        json.dumps({"run_id": run_id, "started_at": "2026-04-07T00:00:00Z"}),
+        encoding="utf-8",
+    )
+    now = predictive_trainer._utc_now()
+    monkeypatch.setattr(predictive_trainer, "_utc_now", lambda: now)
+    monkeypatch.setattr(
+        manager,
+        "_trainer_process_alive_for_run",
+        lambda candidate: False,
+    )
+
+    reconciliation = manager._reconcile_run_state()
+    manifest = manager._read_manifest(run_id)
+
+    assert reconciliation["stale_running_state"] is False
+    assert reconciliation["external_running_state"] is True
+    assert (
+        reconciliation["stale_reason"]
+        == "running_manifest_has_recent_artifact_progress"
+    )
+    assert reconciliation["stale_running_recovery_hold"]["run_id"] == run_id
+    assert reconciliation["stale_running_recovery_hold"][
+        "latest_activity_source"
+    ] == "artifact:model_candidate"
+    assert manager._active_run_id == run_id
+    assert manager.is_running() is True
+    assert manifest["status"] == "running"
+    assert manager.config.lock_path.exists()
+
+
+def test_reconcile_marks_artifact_progress_stale_after_grace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(
+        replace(_make_config(tmp_path), stale_running_grace_secs=300)
+    )
+    run_id = "run-old-artifact"
+    old_now = predictive_trainer._parse_utc_ts("2026-04-07T00:10:01Z")
+    assert old_now is not None
+    manager._write_manifest(
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "running",
+            "started_at": "2026-04-07T00:00:00Z",
+            "stage": "train",
+            "stage_updated_at": "2026-04-07T00:00:00Z",
+        },
+    )
+    run_dir = manager._run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    model_candidate = run_dir / "model_candidate.json"
+    model_candidate.write_text("{}", encoding="utf-8")
+    stale_epoch = predictive_trainer._parse_utc_ts("2026-04-07T00:00:00Z")
+    assert stale_epoch is not None
+    os.utime(model_candidate, (stale_epoch.timestamp(), stale_epoch.timestamp()))
+    manager.config.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    manager.config.lock_path.write_text(
+        json.dumps({"run_id": run_id, "started_at": "2026-04-07T00:00:00Z"}),
+        encoding="utf-8",
+    )
+    os.utime(
+        manager.config.lock_path,
+        (stale_epoch.timestamp(), stale_epoch.timestamp()),
+    )
+    monkeypatch.setattr(predictive_trainer, "_utc_now", lambda: old_now)
+    monkeypatch.setattr(
+        manager,
+        "_trainer_process_alive_for_run",
+        lambda candidate: False,
+    )
+
+    reconciliation = manager._reconcile_run_state()
+    manifest = manager._read_manifest(run_id)
+
+    assert reconciliation["stale_running_state"] is True
+    assert (
+        reconciliation["stale_reason"]
+        == "running_manifest_with_stale_lock_without_live_task"
+    )
+    assert manifest["status"] == "failed"
+    assert manifest["error"]["type"] == "StaleRunState"
+    assert not manager.config.lock_path.exists()
 
 
 def test_scheduler_trigger_retries_failed_run_for_lagging_current_corpus(tmp_path: Path):
