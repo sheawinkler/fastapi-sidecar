@@ -2478,6 +2478,15 @@ class PredictiveTrainerManager:
             "calibration_global_mae_sol": _safe_float(
                 model.get("calibration", {}).get("global_mae_sol")
             ),
+            "direct_net_global_mae_sol": _safe_float(
+                model.get("calibration", {}).get("direct_net_global_mae_sol")
+            ),
+            "direct_net_health_ok": bool(
+                (model.get("direct_net_health") or {}).get("ok", False)
+            ),
+            "direct_net_prediction_mae_sol": _safe_float(
+                (model.get("direct_net_health") or {}).get("prediction_mae")
+            ),
             "p_positive_after_cost_brier": _safe_float(
                 model.get("calibration", {})
                 .get("tradeability_head_brier", {})
@@ -2709,6 +2718,7 @@ class PredictiveTrainerManager:
         candidate_attestation: dict[str, Any],
     ) -> dict[str, Any]:
         issues: list[str] = []
+        waived_issues: list[str] = []
         training = candidate_attestation.get("training") or {}
         validation = candidate_attestation.get("validation") or {}
         candidate_rows = _safe_int(training.get("rows"), 0)
@@ -2733,27 +2743,59 @@ class PredictiveTrainerManager:
         candidate_calibration = candidate_model.get("calibration", {})
         candidate_mae = _safe_float(candidate_calibration.get("global_mae_sol"))
         active_mae = _safe_float(active.get("calibration_global_mae_sol"))
-        if (
-            candidate_mae is not None
-            and active_mae is not None
-            and candidate_mae > active_mae * self.config.calibration_mae_degradation_factor
-        ):
-            issues.append("global_mae_degraded")
-
         candidate_brier = _safe_float(
             candidate_calibration.get("tradeability_head_brier", {}).get("p_positive_after_cost")
         )
         active_brier = _safe_float(active.get("p_positive_after_cost_brier"))
-        if (
+        brier_degraded = (
             candidate_brier is not None
             and active_brier is not None
             and candidate_brier > active_brier * self.config.p_positive_brier_degradation_factor
+        )
+
+        active_direct_mae = _safe_float(active.get("direct_net_global_mae_sol"))
+        candidate_direct_mae = _safe_float(candidate_calibration.get("direct_net_global_mae_sol"))
+        candidate_direct_health = candidate_model.get("direct_net_health") or {}
+        candidate_direct_health_ok = bool(candidate_direct_health.get("ok"))
+        active_shadow_rows = _safe_int(active.get("shadow_rows"), 0)
+        corpus_expanded = (
+            candidate_rows > _safe_int(active.get("training_rows"), 0)
+            and candidate_shadow_rows > max(active_shadow_rows * 2, active_shadow_rows + 25_000)
+        )
+        direct_net_repair = (
+            active_direct_mae is not None
+            and candidate_direct_mae is not None
+            and active_direct_mae >= 0.05
+            and candidate_direct_mae <= 0.02
+            and candidate_direct_mae <= active_direct_mae * 0.25
+            and candidate_direct_health_ok
+        )
+        global_mae_degraded = (
+            candidate_mae is not None
+            and active_mae is not None
+            and candidate_mae > active_mae * self.config.calibration_mae_degradation_factor
+        )
+        global_mae_waived_for_direct_net_repair = (
+            global_mae_degraded
+            and corpus_expanded
+            and direct_net_repair
+            and not brier_degraded
+        )
+        if global_mae_degraded:
+            if global_mae_waived_for_direct_net_repair:
+                waived_issues.append("global_mae_degraded_direct_net_repair")
+            else:
+                issues.append("global_mae_degraded")
+
+        if (
+            brier_degraded
         ):
             issues.append("p_positive_brier_degraded")
 
         return {
             "ok": not issues,
             "issues": issues,
+            "waived_issues": waived_issues,
             "primary_issue": issues[0] if issues else None,
             "candidate_positive_share": round(candidate_positive_share, 6),
             "active_positive_share": round(active_positive_share, 6),
@@ -2761,6 +2803,11 @@ class PredictiveTrainerManager:
             "active_global_mae_sol": active_mae,
             "candidate_p_positive_after_cost_brier": candidate_brier,
             "active_p_positive_after_cost_brier": active_brier,
+            "candidate_direct_net_global_mae_sol": candidate_direct_mae,
+            "active_direct_net_global_mae_sol": active_direct_mae,
+            "candidate_direct_net_health_ok": candidate_direct_health_ok,
+            "corpus_expanded_for_direct_net_repair": corpus_expanded,
+            "global_mae_waived_for_direct_net_repair": global_mae_waived_for_direct_net_repair,
         }
 
     def _promotion_blocked_reason(
