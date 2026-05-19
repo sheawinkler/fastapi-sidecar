@@ -308,6 +308,83 @@ def test_evaluate_candidate_accepts_improvement(tmp_path: Path):
     assert result["issues"] == []
 
 
+def test_evaluate_candidate_waives_cross_corpus_global_mae_for_direct_net_repair(
+    tmp_path: Path,
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    active = {
+        "training_rows": 49_243,
+        "shadow_rows": 49_061,
+        "positive_rows": 27_587,
+        "negative_rows": 21_656,
+        "calibration_global_mae_sol": 0.0013620305916828613,
+        "direct_net_global_mae_sol": 0.36497176542453535,
+        "p_positive_after_cost_brier": 0.13098749826096534,
+    }
+    candidate_model = {
+        "calibration": {
+            "global_mae_sol": 0.005471831352601008,
+            "direct_net_global_mae_sol": 0.005188941983922394,
+            "tradeability_head_brier": {
+                "p_positive_after_cost": 0.15491637157440985
+            },
+        },
+        "direct_net_health": {"ok": True, "prediction_mae": 0.002084298217611487},
+    }
+    candidate_attestation = {
+        "training": {"rows": 184_143, "shadow_rows": 183_757},
+        "validation": {"positive_rows": 96_098, "negative_rows": 88_045},
+    }
+
+    result = manager._evaluate_candidate(
+        active=active,
+        candidate_model=candidate_model,
+        candidate_attestation=candidate_attestation,
+    )
+
+    assert result["ok"] is True
+    assert result["issues"] == []
+    assert result["waived_issues"] == ["global_mae_degraded_direct_net_repair"]
+    assert result["global_mae_waived_for_direct_net_repair"] is True
+
+
+def test_evaluate_candidate_keeps_global_mae_gate_without_direct_net_repair(
+    tmp_path: Path,
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    active = {
+        "training_rows": 100,
+        "shadow_rows": 90,
+        "positive_rows": 60,
+        "negative_rows": 40,
+        "calibration_global_mae_sol": 0.001,
+        "direct_net_global_mae_sol": 0.004,
+        "p_positive_after_cost_brier": 0.2,
+    }
+    candidate_model = {
+        "calibration": {
+            "global_mae_sol": 0.005,
+            "direct_net_global_mae_sol": 0.003,
+            "tradeability_head_brier": {"p_positive_after_cost": 0.18},
+        },
+        "direct_net_health": {"ok": True, "prediction_mae": 0.003},
+    }
+    candidate_attestation = {
+        "training": {"rows": 300, "shadow_rows": 250},
+        "validation": {"positive_rows": 160, "negative_rows": 140},
+    }
+
+    result = manager._evaluate_candidate(
+        active=active,
+        candidate_model=candidate_model,
+        candidate_attestation=candidate_attestation,
+    )
+
+    assert result["ok"] is False
+    assert "global_mae_degraded" in result["issues"]
+    assert result["waived_issues"] == []
+
+
 def test_evaluate_candidate_rejects_positive_share_collapse(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     active = {
