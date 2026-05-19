@@ -1317,6 +1317,36 @@ def test_run_logged_subprocess_streams_output_before_completion(tmp_path: Path):
     assert "stderr-start" in stderr_path.read_text(encoding="utf-8")
 
 
+def test_run_logged_subprocess_exports_trainer_data_dir(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    script_path = tmp_path / "env_probe.py"
+    script_path.write_text(
+        "\n".join(
+            [
+                "import os",
+                "print(os.environ.get('SIDECAR_PREDICTIVE_TRAINER_DATA_DIR', ''))",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stdout_path = tmp_path / "env.stdout.log"
+    stderr_path = tmp_path / "env.stderr.log"
+
+    returncode, stdout_text, stderr_text = manager._run_logged_subprocess(
+        cmd=[sys.executable, str(script_path)],
+        cwd=tmp_path,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        timeout=5,
+    )
+
+    assert returncode == 0
+    assert stderr_text == ""
+    assert stdout_text.strip() == str(manager.config.data_dir)
+    assert stdout_path.read_text(encoding="utf-8").strip() == str(manager.config.data_dir)
+
+
 def test_terminate_active_subprocess_stops_logged_subprocess(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     script_path = tmp_path / "sleeper.py"

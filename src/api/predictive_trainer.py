@@ -1853,6 +1853,7 @@ class PredictiveTrainerManager:
         stderr_path.parent.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
+        env["SIDECAR_PREDICTIVE_TRAINER_DATA_DIR"] = str(self.config.data_dir)
         env["PREDICTIVE_TRAIN_SHADOW_MAX_RAW_ENTRIES"] = (
             "0"
             if self.config.shadow_max_raw_entries is None
