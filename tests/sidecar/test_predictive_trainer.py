@@ -151,6 +151,34 @@ def test_from_env_accepts_numeric_truthy_flags(tmp_path: Path, monkeypatch: pyte
     assert config.shadow_snapshot_tmpdir == (tmp_path / "shadow_snapshots").resolve()
 
 
+def test_from_env_uses_deploy_trigger_min_delta_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    algo_repo = tmp_path / "algo"
+    algo_repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_ALGO_REPO_DIR", str(algo_repo))
+    monkeypatch.delenv("SIDECAR_PREDICTIVE_TRAINER_MIN_NEW_SHADOW_ROWS", raising=False)
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_TRIGGER_MIN_DELTA", "25000")
+
+    config = PredictiveTrainerConfig.from_env(tmp_path / "data")
+
+    assert config.min_new_shadow_rows_to_trigger == 25000
+
+
+def test_from_env_min_new_shadow_rows_overrides_deploy_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    algo_repo = tmp_path / "algo"
+    algo_repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_ALGO_REPO_DIR", str(algo_repo))
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_MIN_NEW_SHADOW_ROWS", "50000")
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_TRIGGER_MIN_DELTA", "25000")
+
+    config = PredictiveTrainerConfig.from_env(tmp_path / "data")
+
+    assert config.min_new_shadow_rows_to_trigger == 50000
+
+
 def test_from_env_can_disable_shadow_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
