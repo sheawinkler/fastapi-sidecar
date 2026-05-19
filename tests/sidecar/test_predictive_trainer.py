@@ -177,6 +177,19 @@ def test_from_env_allows_disabling_train_timeout(
     assert config.train_timeout_secs is None
 
 
+def test_from_env_defaults_to_long_train_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    algo_repo = tmp_path / "algo"
+    algo_repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_ALGO_REPO_DIR", str(algo_repo))
+    monkeypatch.delenv("SIDECAR_PREDICTIVE_TRAINER_TIMEOUT_SECS", raising=False)
+
+    config = PredictiveTrainerConfig.from_env(tmp_path / "data")
+
+    assert config.train_timeout_secs == 200_000
+
+
 def test_from_env_enforces_minimum_positive_train_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
