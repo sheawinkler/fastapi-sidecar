@@ -26,6 +26,7 @@ PREDICTIVE_CANDIDATE_FIREHOSE_STATS_TABLE = (
 )
 SHADOW_CORPUS_FAMILY_ID = "predictive_candidate_firehose:raw_shadow:v1"
 DEFAULT_SHADOW_MAX_RAW_ENTRIES = 1_000
+DEFAULT_TRAIN_TIMEOUT_SECS = 200_000
 
 
 def _utc_now() -> datetime:
@@ -565,7 +566,7 @@ class PredictiveTrainerConfig:
             or sys.executable,
             train_timeout_secs=_parse_optional_timeout_secs(
                 os.getenv("SIDECAR_PREDICTIVE_TRAINER_TIMEOUT_SECS"),
-                1800,
+                DEFAULT_TRAIN_TIMEOUT_SECS,
             ),
             min_new_shadow_rows_to_trigger=max(
                 1,
