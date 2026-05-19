@@ -546,6 +546,11 @@ class PredictiveTrainerConfig:
                 )
             else:
                 scheduler_disabled_reason = "scheduler_explicitly_disabled"
+        min_new_shadow_rows_raw = os.getenv(
+            "SIDECAR_PREDICTIVE_TRAINER_MIN_NEW_SHADOW_ROWS"
+        )
+        if min_new_shadow_rows_raw is None:
+            min_new_shadow_rows_raw = os.getenv("SIDECAR_PREDICTIVE_TRAINER_TRIGGER_MIN_DELTA")
         return cls(
             algo_repo_dir=algo_repo_dir,
             data_dir=data_dir,
@@ -571,7 +576,7 @@ class PredictiveTrainerConfig:
             min_new_shadow_rows_to_trigger=max(
                 1,
                 _safe_int(
-                    os.getenv("SIDECAR_PREDICTIVE_TRAINER_MIN_NEW_SHADOW_ROWS"), 100
+                    min_new_shadow_rows_raw, 100
                 ),
             ),
             max_staleness_secs=max(
