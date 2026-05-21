@@ -1763,6 +1763,20 @@ class PredictiveTrainerManager:
         grace_secs = max(0, int(self.config.stale_running_grace_secs))
         if grace_secs <= 0:
             return None
+        stage = str(manifest.get("stage") or "").strip().lower()
+        artifact_flags = self._artifact_existence_flags(run_id_text)
+        has_training_artifact = any(
+            bool(artifact_flags.get(key))
+            for key in (
+                "model_candidate_exists",
+                "training_candidate_exists",
+                "calibration_candidate_exists",
+                "eval_pack_exists",
+                "promotion_record_exists",
+            )
+        )
+        if stage in {"dataset", "train"} and not has_training_artifact:
+            grace_secs = min(grace_secs, 300)
         activity = self._running_manifest_activity(run_id_text, manifest)
         if activity is None:
             return None
