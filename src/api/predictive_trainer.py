@@ -2732,7 +2732,22 @@ class PredictiveTrainerManager:
 
         candidate_calibration = candidate_model.get("calibration", {})
         candidate_mae = _safe_float(candidate_calibration.get("global_mae_sol"))
-        active_mae = _safe_float(active.get("calibration_global_mae_sol"))
+        promotion_baseline_calibration = candidate_model.get("promotion_baseline_calibration")
+        if not isinstance(promotion_baseline_calibration, dict):
+            promotion_baseline_calibration = {}
+        active_comparison_source = "active_stored_artifact"
+        active_comparison_error = promotion_baseline_calibration.get("error")
+        active_mae = None
+        if not active_comparison_error:
+            active_mae = _safe_float(promotion_baseline_calibration.get("global_mae_sol"))
+            if active_mae is not None:
+                active_comparison_source = str(
+                    promotion_baseline_calibration.get("source")
+                    or "active_model_on_candidate_executed_rows"
+                )
+        if active_mae is None:
+            active_mae = _safe_float(active.get("calibration_global_mae_sol"))
+            active_comparison_source = "active_stored_artifact"
         if (
             candidate_mae is not None
             and active_mae is not None
@@ -2743,7 +2758,15 @@ class PredictiveTrainerManager:
         candidate_brier = _safe_float(
             candidate_calibration.get("tradeability_head_brier", {}).get("p_positive_after_cost")
         )
-        active_brier = _safe_float(active.get("p_positive_after_cost_brier"))
+        active_brier = None
+        if not active_comparison_error:
+            active_brier = _safe_float(
+                (promotion_baseline_calibration.get("tradeability_head_brier") or {}).get(
+                    "p_positive_after_cost"
+                )
+            )
+        if active_brier is None:
+            active_brier = _safe_float(active.get("p_positive_after_cost_brier"))
         if (
             candidate_brier is not None
             and active_brier is not None
@@ -2759,6 +2782,8 @@ class PredictiveTrainerManager:
             "active_positive_share": round(active_positive_share, 6),
             "candidate_global_mae_sol": candidate_mae,
             "active_global_mae_sol": active_mae,
+            "active_comparison_source": active_comparison_source,
+            "active_comparison_error": active_comparison_error,
             "candidate_p_positive_after_cost_brier": candidate_brier,
             "active_p_positive_after_cost_brier": active_brier,
         }
