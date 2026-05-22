@@ -385,6 +385,89 @@ def test_evaluate_candidate_accepts_improvement(tmp_path: Path):
     assert result["issues"] == []
 
 
+def test_evaluate_candidate_waives_row_counts_for_non_comparable_runtime_corpus(
+    tmp_path: Path,
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    active = {
+        "training_rows": 100,
+        "shadow_rows": 90,
+        "positive_rows": 60,
+        "negative_rows": 40,
+        "calibration_global_mae_sol": 0.8,
+        "p_positive_after_cost_brier": 0.2,
+        "shadow_corpus_instance_id": "legacy-sqlite-corpus",
+    }
+    candidate_model = {
+        "calibration": {
+            "global_mae_sol": 0.7,
+            "tradeability_head_brier": {"p_positive_after_cost": 0.18},
+        }
+    }
+    candidate_attestation = {
+        "training": {
+            "rows": 80,
+            "shadow_rows": 70,
+            "shadow_corpus_instance_id": "runtime_analytics:/tmp/runtime.sqlite",
+        },
+        "validation": {"positive_rows": 65, "negative_rows": 35},
+    }
+
+    result = manager._evaluate_candidate(
+        active=active,
+        candidate_model=candidate_model,
+        candidate_attestation=candidate_attestation,
+    )
+
+    assert result["ok"] is True
+    assert result["issues"] == []
+    assert result["row_count_gates_comparable"] is False
+    assert result["row_count_gate_waived_issues"] == [
+        "training_rows_not_improved",
+        "shadow_rows_not_improved",
+    ]
+
+
+def test_evaluate_candidate_requires_quality_gain_to_waive_non_comparable_rows(
+    tmp_path: Path,
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    active = {
+        "training_rows": 100,
+        "shadow_rows": 90,
+        "positive_rows": 60,
+        "negative_rows": 40,
+        "calibration_global_mae_sol": 0.8,
+        "p_positive_after_cost_brier": 0.2,
+        "shadow_corpus_instance_id": "legacy-sqlite-corpus",
+    }
+    candidate_model = {
+        "calibration": {
+            "global_mae_sol": 0.8,
+            "tradeability_head_brier": {"p_positive_after_cost": 0.2},
+        }
+    }
+    candidate_attestation = {
+        "training": {
+            "rows": 80,
+            "shadow_rows": 70,
+            "shadow_corpus_instance_id": "runtime_analytics:/tmp/runtime.sqlite",
+        },
+        "validation": {"positive_rows": 65, "negative_rows": 35},
+    }
+
+    result = manager._evaluate_candidate(
+        active=active,
+        candidate_model=candidate_model,
+        candidate_attestation=candidate_attestation,
+    )
+
+    assert result["ok"] is False
+    assert result["row_count_gates_comparable"] is False
+    assert "row_count_regression_without_mae_improvement" in result["issues"]
+    assert "row_count_regression_without_brier_improvement" in result["issues"]
+
+
 def test_evaluate_candidate_rejects_positive_share_collapse(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     active = {
