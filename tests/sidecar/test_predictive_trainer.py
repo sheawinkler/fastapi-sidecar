@@ -2265,6 +2265,71 @@ def test_health_payload_clears_stale_repo_not_launch_ready_pending_restart(
     assert manager._pending_restart is None
 
 
+def test_repo_launch_ready_fetches_origin_main_before_comparison(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd, **_kwargs):
+        calls.append(list(cmd))
+        args = list(cmd[1:])
+        stdout_by_args = {
+            ("branch", "--show-current"): "main\n",
+            ("status", "--short", "--untracked-files=no"): "",
+            ("ls-files", "--others", "--exclude-standard"): "scratch.json\n",
+            ("rev-parse", "HEAD"): "abc123\n",
+            ("rev-parse", "origin/main"): "abc123\n",
+        }
+        if args == ["fetch", "--quiet", "origin", "main"]:
+            return predictive_trainer.subprocess.CompletedProcess(cmd, 0, "", "")
+        return predictive_trainer.subprocess.CompletedProcess(
+            cmd, 0, stdout_by_args[tuple(args)], ""
+        )
+
+    monkeypatch.setattr("src.api.predictive_trainer.subprocess.run", _fake_run)
+
+    repo_state = manager._repo_launch_ready()
+
+    assert calls[0] == ["git", "fetch", "--quiet", "origin", "main"]
+    assert repo_state["origin_main_refreshed"] is True
+    assert repo_state["git_fetch_status"] == "ok"
+    assert repo_state["status_clean"] is True
+    assert repo_state["head_matches_origin_main"] is True
+    assert repo_state["untracked_count"] == 1
+
+
+def test_repo_launch_ready_blocks_when_origin_fetch_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+
+    def _fake_run(cmd, **_kwargs):
+        args = list(cmd[1:])
+        if args == ["fetch", "--quiet", "origin", "main"]:
+            raise predictive_trainer.subprocess.CalledProcessError(128, cmd)
+        stdout_by_args = {
+            ("branch", "--show-current"): "main\n",
+            ("status", "--short", "--untracked-files=no"): "",
+            ("ls-files", "--others", "--exclude-standard"): "",
+            ("rev-parse", "HEAD"): "abc123\n",
+            ("rev-parse", "origin/main"): "abc123\n",
+        }
+        return predictive_trainer.subprocess.CompletedProcess(
+            cmd, 0, stdout_by_args[tuple(args)], ""
+        )
+
+    monkeypatch.setattr("src.api.predictive_trainer.subprocess.run", _fake_run)
+
+    repo_state = manager._repo_launch_ready()
+
+    assert repo_state["origin_main_refreshed"] is False
+    assert repo_state["git_fetch_status"] == "failed"
+    assert repo_state["status_clean"] is False
+    assert repo_state["head_matches_origin_main"] is True
+    assert manager._is_repo_launch_ready(repo_state) is False
+
+
 def test_history_payload_reads_jsonl(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     manager._append_history({"timestamp": "2026-04-05T00:00:00Z", "event": "trainer_run_completed"})
@@ -2327,7 +2392,7 @@ def test_promote_candidate_relaunch_uses_wrapper_replace_env(tmp_path: Path, mon
     assert result["state"] == "promoted_and_relaunch_requested"
     assert result["restart_pid"] == 4242
     assert result["restart_dispatch"] == "detached_wrapper"
-    assert captured["cmd"] == [str(manager.config.deploy_script_path), "--live", "--skip-build"]
+    assert captured["cmd"] == [str(manager.config.deploy_script_path), "--live"]
     assert captured["env"]["DEPLOY_WRAPPER_REPLACE_EXISTING"] == "1"
     assert captured["env"]["ALGOTRADER_WALLET"] == str(manager.config.wallet_path)
     assert captured["env"]["SIDECAR_REQUIRE_HEALTH"] == "0"
