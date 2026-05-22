@@ -2992,11 +2992,21 @@ class PredictiveTrainerManager:
         active_negative = _safe_int(active.get("negative_rows"), 0)
         active_total = max(1, active_positive + active_negative)
         active_positive_share = active_positive / float(active_total)
+        active_corpus_instance = str(active.get("shadow_corpus_instance_id") or "").strip()
+        candidate_corpus_instance = str(
+            training.get("shadow_corpus_instance_id") or ""
+        ).strip()
+        row_count_gates_comparable = not (
+            active_corpus_instance
+            and candidate_corpus_instance
+            and active_corpus_instance != candidate_corpus_instance
+        )
+        row_count_issues: list[str] = []
 
         if candidate_rows <= _safe_int(active.get("training_rows"), 0):
-            issues.append("training_rows_not_improved")
+            row_count_issues.append("training_rows_not_improved")
         if candidate_shadow_rows <= _safe_int(active.get("shadow_rows"), 0):
-            issues.append("shadow_rows_not_improved")
+            row_count_issues.append("shadow_rows_not_improved")
         if candidate_positive_share + self.config.positive_share_collapse_tolerance < active_positive_share:
             issues.append("positive_share_collapsed")
 
@@ -3043,11 +3053,32 @@ class PredictiveTrainerManager:
             and candidate_brier > active_brier * self.config.p_positive_brier_degradation_factor
         ):
             issues.append("p_positive_brier_degraded")
+        if row_count_gates_comparable:
+            issues = row_count_issues + issues
+            waived_row_count_issues: list[str] = []
+        else:
+            candidate_mae_improved = (
+                candidate_mae is not None and active_mae is not None and candidate_mae < active_mae
+            )
+            candidate_brier_improved = (
+                candidate_brier is not None
+                and active_brier is not None
+                and candidate_brier < active_brier
+            )
+            waived_row_count_issues = list(row_count_issues)
+            if row_count_issues and not candidate_mae_improved:
+                issues.append("row_count_regression_without_mae_improvement")
+            if row_count_issues and not candidate_brier_improved:
+                issues.append("row_count_regression_without_brier_improvement")
 
         return {
             "ok": not issues,
             "issues": issues,
             "primary_issue": issues[0] if issues else None,
+            "row_count_gates_comparable": row_count_gates_comparable,
+            "row_count_gate_waived_issues": waived_row_count_issues,
+            "active_shadow_corpus_instance_id": active_corpus_instance or None,
+            "candidate_shadow_corpus_instance_id": candidate_corpus_instance or None,
             "candidate_positive_share": round(candidate_positive_share, 6),
             "active_positive_share": round(active_positive_share, 6),
             "candidate_global_mae_sol": candidate_mae,
