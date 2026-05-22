@@ -27,6 +27,14 @@ PREDICTIVE_CANDIDATE_FIREHOSE_STATS_TABLE = (
 SHADOW_CORPUS_FAMILY_ID = "predictive_candidate_firehose:raw_shadow:v1"
 DEFAULT_SHADOW_MAX_RAW_ENTRIES = 1_000
 DEFAULT_TRAIN_TIMEOUT_SECS = 200_000
+DEFAULT_RUNTIME_ANALYTICS_DB = Path(
+    "/Volumes/wd_black/runtime.noindex/algotrader/runtime_analytics.sqlite"
+)
+RUNTIME_ANALYTICS_ARENA_KIND = "memmcp_runtime_blob:arena"
+RUNTIME_ANALYTICS_PREDICTIVE_FIREHOSE_FILE_PREFIX = (
+    "arena__outcomes__predictive_candidate_firehose_"
+)
+RUNTIME_ANALYTICS_FILE_NAME_TIMESTAMP_INDEX = "telemetry_queue_file_name_timestamp_idx"
 
 
 def _utc_now() -> datetime:
@@ -93,6 +101,27 @@ def _env_optional_path(*names: str) -> Path | None:
         if raw:
             return Path(raw).expanduser().resolve()
     return None
+
+
+def _normalize_shadow_source(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"runtime", "runtime_db", "runtime_analytics"}:
+        return "runtime_analytics"
+    return "local_sqlite"
+
+
+def _iso_from_epoch_ms(value: Any) -> str | None:
+    ms = _safe_int(value, 0)
+    if ms <= 0:
+        return None
+    try:
+        return (
+            datetime.fromtimestamp(ms / 1000.0, timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+    except Exception:
+        return None
 
 
 def _resolved_shadow_corpus_family_id(value: Any, *, has_shadow_history: bool) -> str | None:
@@ -321,6 +350,77 @@ def _read_shadow_sqlite_stats(path: Path) -> dict[str, Any]:
         conn.close()
 
 
+def _read_runtime_shadow_stats(path: Path) -> dict[str, Any]:
+    payload = _default_shadow_index_stats_cache()
+    payload["shadow_index_count_cached"] = False
+    payload["shadow_index_source"] = "runtime_analytics"
+    payload["shadow_corpus_instance_id"] = f"runtime_analytics:{path}"
+    payload["shadow_corpus_family_id"] = SHADOW_CORPUS_FAMILY_ID
+    if not path.exists():
+        payload["shadow_index_count_error"] = "runtime_analytics_missing"
+        payload["shadow_index_probe_error"] = "runtime_analytics_missing"
+        payload["shadow_index_count_refreshed_at"] = _utc_iso()
+        return payload
+    try:
+        stat_result = path.stat()
+        payload["shadow_index_size_bytes"] = int(stat_result.st_size)
+        payload["shadow_index_mtime_ns"] = int(getattr(stat_result, "st_mtime_ns", 0))
+    except Exception:
+        pass
+    conn = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)
+    try:
+        conn.execute("PRAGMA busy_timeout=2000")
+        conn.execute("PRAGMA query_only=ON")
+        table_present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'telemetry_queue' LIMIT 1"
+        ).fetchone()
+        if not table_present:
+            payload["shadow_index_count_error"] = "runtime_analytics_telemetry_queue_missing"
+            payload["shadow_index_probe_error"] = "runtime_analytics_telemetry_queue_missing"
+            payload["shadow_index_count_refreshed_at"] = _utc_iso()
+            return payload
+        index_present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ? LIMIT 1",
+            (RUNTIME_ANALYTICS_FILE_NAME_TIMESTAMP_INDEX,),
+        ).fetchone()
+        index_hint = (
+            f" INDEXED BY {RUNTIME_ANALYTICS_FILE_NAME_TIMESTAMP_INDEX}"
+            if index_present
+            else ""
+        )
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*), MIN(timestamp_ms), MAX(timestamp_ms)
+            FROM telemetry_queue{index_hint}
+            WHERE file_name GLOB ? AND kind = ?
+            """,
+            (
+                f"{RUNTIME_ANALYTICS_PREDICTIVE_FIREHOSE_FILE_PREFIX}*",
+                RUNTIME_ANALYTICS_ARENA_KIND,
+            ),
+        ).fetchone()
+        entry_count = _safe_int((row or [0])[0], 0)
+        first_ts_ms = (row or [None, None, None])[1]
+        last_ts_ms = (row or [None, None, None])[2]
+        payload["current_shadow_entry_count"] = entry_count
+        payload["shadow_index_last_seq"] = _safe_int(last_ts_ms, 0)
+        payload["shadow_index_last_write_at"] = _iso_from_epoch_ms(last_ts_ms)
+        payload["shadow_corpus_created_at"] = _iso_from_epoch_ms(first_ts_ms)
+        payload["shadow_corpus_last_seq"] = _safe_int(last_ts_ms, 0)
+        payload["shadow_index_count_refreshed_at"] = _utc_iso()
+        payload["shadow_index_count_error"] = None
+        payload["shadow_index_probe_state"] = "available"
+        payload["shadow_index_probe_error"] = None
+        return payload
+    except Exception as exc:
+        payload["shadow_index_count_error"] = str(exc)
+        payload["shadow_index_probe_error"] = str(exc)
+        payload["shadow_index_count_refreshed_at"] = _utc_iso()
+        return payload
+    finally:
+        conn.close()
+
+
 def _summarize_logged_subprocess_failure(stdout_text: str, stderr_text: str) -> str:
     for blob in (stderr_text, stdout_text):
         lines = [line.strip() for line in blob.splitlines() if line.strip()]
@@ -419,6 +519,8 @@ class PredictiveTrainerConfig:
     shadow_archive_min_interval_secs: int = 3600
     shadow_archive_timeout_secs: int = 180
     stale_running_grace_secs: int = 3600
+    shadow_source: str = "local_sqlite"
+    runtime_analytics_db_path: Path | None = None
 
     @property
     def runs_dir(self) -> Path:
@@ -551,6 +653,13 @@ class PredictiveTrainerConfig:
         )
         if min_new_shadow_rows_raw is None:
             min_new_shadow_rows_raw = os.getenv("SIDECAR_PREDICTIVE_TRAINER_TRIGGER_MIN_DELTA")
+        shadow_source = _normalize_shadow_source(os.getenv("PREDICTIVE_SHADOW_SOURCE"))
+        runtime_analytics_db_path = _env_optional_path(
+            "REAL_ALGOTRADER_RUNTIME_ANALYTICS_DB",
+            "MEMMCP_RUNTIME_ANALYTICS_STORE_PATH",
+        )
+        if shadow_source == "runtime_analytics" and runtime_analytics_db_path is None:
+            runtime_analytics_db_path = DEFAULT_RUNTIME_ANALYTICS_DB
         return cls(
             algo_repo_dir=algo_repo_dir,
             data_dir=data_dir,
@@ -645,6 +754,8 @@ class PredictiveTrainerConfig:
                     3600,
                 ),
             ),
+            shadow_source=shadow_source,
+            runtime_analytics_db_path=runtime_analytics_db_path,
         )
 
 
@@ -703,6 +814,24 @@ class PredictiveTrainerManager:
                 file=sys.stderr,
                 flush=True,
             )
+
+    def _shadow_stats_source(self) -> str:
+        return _normalize_shadow_source(self.config.shadow_source)
+
+    def _shadow_index_payload_source(self) -> str:
+        if self._shadow_stats_source() == "runtime_analytics":
+            return "runtime_analytics"
+        return "sqlite_stats"
+
+    def _shadow_stats_path(self) -> Path:
+        if self._shadow_stats_source() == "runtime_analytics":
+            return self.config.runtime_analytics_db_path or DEFAULT_RUNTIME_ANALYTICS_DB
+        return self.config.shadow_sqlite_path
+
+    def _read_shadow_stats_sync(self) -> dict[str, Any]:
+        if self._shadow_stats_source() == "runtime_analytics":
+            return _read_runtime_shadow_stats(self._shadow_stats_path())
+        return _read_shadow_sqlite_stats(self.config.shadow_sqlite_path)
 
     def set_guidance_subscriber_count_provider(
         self, provider: Callable[[], int] | None
@@ -777,6 +906,11 @@ class PredictiveTrainerManager:
             "active_training_path": str(self.config.training_path),
             "active_calibration_path": str(self.config.calibration_path),
             "active_next_state_ledger_path": str(self.config.next_state_ledger_path),
+            "shadow_source": self._shadow_stats_source(),
+            "shadow_stats_path": str(self._shadow_stats_path()),
+            "runtime_analytics_db_path": str(self.config.runtime_analytics_db_path)
+            if self.config.runtime_analytics_db_path is not None
+            else None,
             "shadow_index_path": str(self.config.shadow_sqlite_path),
             "shadow_index_legacy_path": str(self.config.shadow_index_path),
             "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
@@ -816,6 +950,11 @@ class PredictiveTrainerManager:
             "pending_restart": self._pending_restart,
             "active_model": self._active_artifacts(),
             "latest_run_context": self._latest_run_context_path(),
+            "shadow_source": self._shadow_stats_source(),
+            "shadow_stats_path": str(self._shadow_stats_path()),
+            "runtime_analytics_db_path": str(self.config.runtime_analytics_db_path)
+            if self.config.runtime_analytics_db_path is not None
+            else None,
             "shadow_index_path": str(self.config.shadow_sqlite_path),
             "shadow_index_legacy_path": str(self.config.shadow_index_path),
             "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
@@ -951,11 +1090,16 @@ class PredictiveTrainerManager:
                         payload.get("shadow_corpus_last_seq"), 0
                     ),
                 }
+                if (
+                    str(cached.get("shadow_index_source") or "")
+                    != self._shadow_index_payload_source()
+                ):
+                    return self._read_shadow_stats_sync()
                 if cached["shadow_index_count_refreshed_at"] is not None or cached[
                     "current_shadow_entry_count"
                 ] > 0:
                     return cached
-        return _read_shadow_sqlite_stats(self.config.shadow_sqlite_path)
+        return self._read_shadow_stats_sync()
 
     def _shadow_index_probe_age_secs(
         self, stats: dict[str, Any] | None = None
@@ -971,6 +1115,11 @@ class PredictiveTrainerManager:
     ) -> bool:
         payload = stats or self._shadow_index_stats_cache
         if not isinstance(payload, dict):
+            return True
+        if (
+            str(payload.get("shadow_index_source") or "")
+            != self._shadow_index_payload_source()
+        ):
             return True
         probe_state = (
             str(payload.get("shadow_index_probe_state") or "").strip() or "unavailable"
@@ -988,7 +1137,7 @@ class PredictiveTrainerManager:
         ):
             return True
 
-        path = self.config.shadow_sqlite_path
+        path = self._shadow_stats_path()
         if not path.exists():
             return probe_state != "unavailable"
         try:
@@ -1025,7 +1174,7 @@ class PredictiveTrainerManager:
         _write_json(self.config.scheduler_state_path, state)
 
     def _refresh_shadow_index_stats_cache_sync(self) -> dict[str, Any]:
-        stats = _read_shadow_sqlite_stats(self.config.shadow_sqlite_path)
+        stats = self._read_shadow_stats_sync()
         self._shadow_index_stats_cache = stats
         self._persist_shadow_index_stats_cache()
         return self._shadow_index_public_payload(stats)
@@ -2094,7 +2243,7 @@ class PredictiveTrainerManager:
         return None
 
     def _default_scheduler_state(self) -> dict[str, Any]:
-        shadow_stats = _read_shadow_sqlite_stats(self.config.shadow_sqlite_path)
+        shadow_stats = self._read_shadow_stats_sync()
         current_shadow_entries = _safe_int(shadow_stats.get("current_shadow_entry_count"), 0)
         latest_manifest = self._latest_manifest_summary()
         if latest_manifest:
@@ -2269,6 +2418,7 @@ class PredictiveTrainerManager:
             "last_run_id": state.get("last_run_id"),
             "last_requested_by": state.get("last_requested_by"),
             "last_trigger_reason": state.get("last_trigger_reason"),
+            "shadow_index_source": shadow_stats.get("shadow_index_source"),
             "shadow_index_count_cached": bool(
                 shadow_stats.get("shadow_index_count_cached", True)
             ),
@@ -3575,6 +3725,11 @@ class PredictiveTrainerManager:
             "active_training_path": str(self.config.training_path),
             "active_calibration_path": str(self.config.calibration_path),
             "active_next_state_ledger_path": str(self.config.next_state_ledger_path),
+            "shadow_source": self._shadow_stats_source(),
+            "shadow_stats_path": str(self._shadow_stats_path()),
+            "runtime_analytics_db_path": str(self.config.runtime_analytics_db_path)
+            if self.config.runtime_analytics_db_path is not None
+            else None,
             "shadow_index_path": str(self.config.shadow_sqlite_path),
             "shadow_index_legacy_path": str(self.config.shadow_index_path),
             "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
@@ -3614,6 +3769,11 @@ class PredictiveTrainerManager:
             "pending_restart": freshness.get("pending_restart"),
             "active_model": self._active_artifacts(),
             "latest_run_context": self._latest_run_context_path(),
+            "shadow_source": self._shadow_stats_source(),
+            "shadow_stats_path": str(self._shadow_stats_path()),
+            "runtime_analytics_db_path": str(self.config.runtime_analytics_db_path)
+            if self.config.runtime_analytics_db_path is not None
+            else None,
             "shadow_index_path": str(self.config.shadow_sqlite_path),
             "shadow_index_legacy_path": str(self.config.shadow_index_path),
             "shadow_duckdb_path": str(self.config.shadow_duckdb_path),

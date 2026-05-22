@@ -61,6 +61,46 @@ def _write_shadow_sqlite_count(
     conn.close()
 
 
+def _write_runtime_shadow_rows(db_path: Path, count: int, *, start_ms: int = 1_000) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS telemetry_queue (
+            kind TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            timestamp_ms INTEGER NOT NULL,
+            payload_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS telemetry_queue_file_name_timestamp_idx
+        ON telemetry_queue(file_name, timestamp_ms DESC)
+        """
+    )
+    conn.execute("DELETE FROM telemetry_queue")
+    rows = [
+        (
+            "memmcp_runtime_blob:arena",
+            f"arena__outcomes__predictive_candidate_firehose_{idx}.json",
+            start_ms + idx,
+            "{}",
+        )
+        for idx in range(count)
+    ]
+    conn.executemany(
+        """
+        INSERT INTO telemetry_queue (kind, file_name, timestamp_ms, payload_json)
+        VALUES (?, ?, ?, ?)
+        """,
+        rows,
+    )
+    conn.commit()
+    conn.close()
+
+
 def _write_active_training_artifact(
     config: PredictiveTrainerConfig,
     *,
@@ -473,6 +513,69 @@ def test_scheduler_trigger_prefers_row_threshold(tmp_path: Path):
     assert trigger["requested_by"] == "scheduler_row_threshold"
     assert trigger["new_shadow_rows_since_trigger"] == 110
     assert trigger["row_threshold_reached"] is True
+
+
+def test_scheduler_trigger_uses_runtime_analytics_shadow_source(tmp_path: Path):
+    runtime_db = tmp_path / "runtime_analytics.sqlite"
+    config = replace(
+        _make_config(tmp_path),
+        shadow_source="runtime_analytics",
+        runtime_analytics_db_path=runtime_db,
+    )
+    manager = PredictiveTrainerManager(config)
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 999)
+    _write_runtime_shadow_rows(runtime_db, 260)
+    _write_active_training_artifact(config, raw_shadow_entry_count=120)
+    manager._write_scheduler_state(
+        {
+            "last_run_id": "run-old",
+            "last_requested_by": "scheduler_interval",
+            "last_run_started_at": "2026-04-07T00:00:00Z",
+            "last_trigger_reason": "scheduler_interval",
+            "last_trigger_shadow_entry_count": 100,
+        }
+    )
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+
+    trigger = manager._scheduler_trigger_payload()
+
+    assert trigger["shadow_index_source"] == "runtime_analytics"
+    assert trigger["current_shadow_entry_count"] == 260
+    assert trigger["shadow_index_last_seq"] == 1259
+    assert trigger["new_shadow_rows_since_trigger"] == 160
+    assert trigger["should_start"] is True
+    assert trigger["requested_by"] == "scheduler_row_threshold"
+    assert trigger["row_threshold_reached"] is True
+
+
+def test_runtime_analytics_source_ignores_stale_cached_sqlite_count(tmp_path: Path):
+    runtime_db = tmp_path / "runtime_analytics.sqlite"
+    config = replace(
+        _make_config(tmp_path),
+        shadow_source="runtime_analytics",
+        runtime_analytics_db_path=runtime_db,
+    )
+    config.scheduler_state_path.parent.mkdir(parents=True, exist_ok=True)
+    config.scheduler_state_path.write_text(
+        json.dumps(
+            {
+                "current_shadow_entry_count": 385605,
+                "shadow_index_source": "sqlite_stats",
+                "shadow_index_count_refreshed_at": "2026-04-07T00:00:00Z",
+                "shadow_index_probe_state": "available",
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_runtime_shadow_rows(runtime_db, 333)
+
+    manager = PredictiveTrainerManager(config)
+    payload = manager.health_payload()
+
+    assert payload["shadow_source"] == "runtime_analytics"
+    assert payload["shadow_stats_path"] == str(runtime_db)
+    assert payload["current_shadow_entry_count"] == 333
+    assert payload["scheduler_trigger"]["shadow_index_source"] == "runtime_analytics"
 
 
 def test_python_cmd_forces_unbuffered_python(tmp_path: Path):
