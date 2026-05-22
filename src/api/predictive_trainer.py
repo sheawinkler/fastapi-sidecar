@@ -2620,6 +2620,31 @@ class PredictiveTrainerManager:
             except (FileNotFoundError, subprocess.CalledProcessError) as exc:
                 return "", str(exc)
 
+        fetch_timeout_secs = max(
+            1,
+            _safe_int(
+                os.getenv("SIDECAR_PREDICTIVE_TRAINER_GIT_FETCH_TIMEOUT_SECS"),
+                120,
+            ),
+        )
+        fetch_status = "ok"
+        fetch_error = None
+        try:
+            subprocess.run(
+                ["git", "fetch", "--quiet", "origin", "main"],
+                cwd=self.config.algo_repo_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=fetch_timeout_secs,
+            )
+        except subprocess.TimeoutExpired:
+            fetch_status = "timeout"
+            fetch_error = f"git fetch origin main timed out after {fetch_timeout_secs}s"
+        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+            fetch_status = "failed"
+            fetch_error = str(exc)
+
         branch, branch_error = _git_output("branch", "--show-current")
         tracked_status, tracked_status_error = _git_output(
             "status", "--short", "--untracked-files=no"
@@ -2630,7 +2655,8 @@ class PredictiveTrainerManager:
         head, head_error = _git_output("rev-parse", "HEAD")
         origin_main, origin_main_error = _git_output("rev-parse", "origin/main")
         repo_probe_error = (
-            branch_error
+            fetch_error
+            or branch_error
             or tracked_status_error
             or untracked_error
             or head_error
@@ -2647,6 +2673,10 @@ class PredictiveTrainerManager:
             "head": head,
             "origin_main": origin_main,
             "head_matches_origin_main": bool(head and origin_main and head == origin_main),
+            "origin_main_refreshed": fetch_status == "ok",
+            "git_fetch_status": fetch_status,
+            "git_fetch_error": fetch_error,
+            "git_fetch_timeout_secs": fetch_timeout_secs,
             "repo_probe_error": repo_probe_error,
         }
 
@@ -3656,7 +3686,7 @@ class PredictiveTrainerManager:
                 "w", encoding="utf-8"
             ) as stderr_fh:
                 restart_process = subprocess.Popen(
-                    [str(self.config.deploy_script_path), "--live", "--skip-build"],
+                    [str(self.config.deploy_script_path), "--live"],
                     cwd=self.config.algo_repo_dir,
                     stdout=stdout_fh,
                     stderr=stderr_fh,
