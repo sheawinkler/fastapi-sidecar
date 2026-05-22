@@ -3756,6 +3756,7 @@ class PredictiveTrainerManager:
             **promotion,
         }
         self._write_manifest(run_id, manifest)
+        _write_json(self._run_artifact_paths(run_id)["promotion_record"], manifest["promotion"])
         self._append_history(
             {
                 "timestamp": _utc_iso(),

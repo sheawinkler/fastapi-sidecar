@@ -2153,9 +2153,12 @@ async def test_promote_run_updates_manifest(tmp_path: Path, monkeypatch: pytest.
 
     result = await manager.promote_run(run_id, forced=True)
     updated = manager._read_manifest(run_id)
+    promotion_record = json.loads((run_dir / "promotion.json").read_text(encoding="utf-8"))
 
     assert result["state"] == "promoted_pending_restart"
     assert updated["promotion"]["state"] == "promoted_pending_restart"
+    assert promotion_record["state"] == "promoted_pending_restart"
+    assert promotion_record["forced"] is True
 
 
 @pytest.mark.asyncio
