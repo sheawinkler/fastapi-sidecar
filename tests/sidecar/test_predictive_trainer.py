@@ -134,6 +134,43 @@ def _write_active_training_artifact(
     )
 
 
+def _write_completed_manifest(
+    config: PredictiveTrainerConfig,
+    *,
+    run_id: str,
+    raw_shadow_entry_count: int,
+    shadow_corpus_instance_id: str,
+    shadow_corpus_family_id: str = SHADOW_CORPUS_FAMILY_ID,
+    shadow_corpus_last_seq: int | None = None,
+) -> None:
+    run_dir = config.runs_dir / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    last_seq = (
+        raw_shadow_entry_count
+        if shadow_corpus_last_seq is None
+        else shadow_corpus_last_seq
+    )
+    payload = {
+        "run_id": run_id,
+        "status": "completed",
+        "requested_by": "scheduler_row_threshold",
+        "started_at": "2026-04-07T00:00:00Z",
+        "raw_shadow_entry_count": raw_shadow_entry_count,
+        "shadow_corpus_instance_id": shadow_corpus_instance_id,
+        "shadow_corpus_family_id": shadow_corpus_family_id,
+        "shadow_corpus_last_seq": last_seq,
+        "candidate_model": {
+            "raw_shadow_entry_count": raw_shadow_entry_count,
+            "shadow_corpus_entry_count": raw_shadow_entry_count,
+            "shadow_corpus_instance_id": shadow_corpus_instance_id,
+            "shadow_corpus_family_id": shadow_corpus_family_id,
+            "shadow_corpus_last_seq": last_seq,
+        },
+        "promotion": {"state": "gated_off"},
+    }
+    (run_dir / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
 def _make_config(tmp_path: Path) -> PredictiveTrainerConfig:
     algo_repo = tmp_path / "algo"
     (algo_repo / "logs/analysis/predictive_entry").mkdir(parents=True, exist_ok=True)
@@ -576,6 +613,60 @@ def test_runtime_analytics_source_ignores_stale_cached_sqlite_count(tmp_path: Pa
     assert payload["shadow_stats_path"] == str(runtime_db)
     assert payload["current_shadow_entry_count"] == 333
     assert payload["scheduler_trigger"]["shadow_index_source"] == "runtime_analytics"
+
+
+def test_runtime_analytics_scheduler_baseline_ignores_legacy_counts(tmp_path: Path):
+    runtime_db = tmp_path / "runtime_analytics.sqlite"
+    config = replace(
+        _make_config(tmp_path),
+        shadow_source="runtime_analytics",
+        runtime_analytics_db_path=runtime_db,
+        min_new_shadow_rows_to_trigger=10,
+    )
+    runtime_instance_id = f"runtime_analytics:{runtime_db}"
+    _write_runtime_shadow_rows(runtime_db, 60)
+    _write_active_training_artifact(
+        config,
+        raw_shadow_entry_count=380,
+        corpus_instance_id="legacy-sqlite-corpus",
+    )
+    _write_completed_manifest(
+        config,
+        run_id="run-runtime",
+        raw_shadow_entry_count=40,
+        shadow_corpus_instance_id=runtime_instance_id,
+        shadow_corpus_last_seq=1039,
+    )
+    manager = PredictiveTrainerManager(config)
+    manager._write_scheduler_state(
+        {
+            "last_run_id": "run-runtime",
+            "last_requested_by": "scheduler_row_threshold",
+            "last_run_started_at": "2026-04-07T00:00:00Z",
+            "last_trigger_reason": "scheduler_row_threshold",
+            "last_trigger_shadow_entry_count": 385,
+            "shadow_index_source": "runtime_analytics",
+            "shadow_corpus_instance_id": runtime_instance_id,
+        }
+    )
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+
+    trigger = manager._scheduler_trigger_payload()
+
+    assert trigger["shadow_index_source"] == "runtime_analytics"
+    assert trigger["current_shadow_entry_count"] == 60
+    assert trigger["active_model_raw_shadow_entry_count"] == 380
+    assert trigger["active_model_shadow_count_comparable"] is False
+    assert trigger["last_trigger_shadow_entry_count"] == 40
+    assert (
+        trigger["last_trigger_shadow_entry_count_source"]
+        == "latest_completed_same_shadow_corpus"
+    )
+    assert trigger["effective_trigger_shadow_entry_count"] == 40
+    assert trigger["new_shadow_rows_since_effective_baseline"] == 20
+    assert trigger["row_threshold_reached"] is True
+    assert trigger["should_start"] is True
+    assert trigger["requested_by"] == "scheduler_row_threshold"
 
 
 def test_python_cmd_forces_unbuffered_python(tmp_path: Path):

@@ -2286,6 +2286,86 @@ class PredictiveTrainerManager:
         with self._state_io_lock:
             _write_json(self.config.scheduler_state_path, payload)
 
+    def _latest_completed_shadow_baseline(
+        self, shadow_stats: dict[str, Any]
+    ) -> tuple[int | None, str | None]:
+        latest_manifest = self._latest_manifest_summary(status="completed") or {}
+        if str(latest_manifest.get("status") or "").strip().lower() != "completed":
+            return None, None
+        latest_candidate = dict(latest_manifest.get("candidate_model") or {})
+        latest_count = _safe_int(
+            latest_manifest.get("raw_shadow_entry_count")
+            or latest_candidate.get("shadow_corpus_entry_count")
+            or latest_candidate.get("raw_shadow_entry_count"),
+            0,
+        )
+        if latest_count <= 0:
+            return None, None
+        current_count = _safe_int(shadow_stats.get("current_shadow_entry_count"), 0)
+        if current_count <= 0 or latest_count > current_count:
+            return None, None
+        current_family = _resolved_shadow_corpus_family_id(
+            shadow_stats.get("shadow_corpus_family_id"),
+            has_shadow_history=current_count > 0,
+        )
+        latest_family = _resolved_shadow_corpus_family_id(
+            latest_manifest.get("shadow_corpus_family_id")
+            or latest_candidate.get("shadow_corpus_family_id"),
+            has_shadow_history=latest_count > 0,
+        )
+        if current_family and latest_family and current_family != latest_family:
+            return None, None
+        current_instance = str(shadow_stats.get("shadow_corpus_instance_id") or "").strip()
+        latest_instance = str(
+            latest_manifest.get("shadow_corpus_instance_id")
+            or latest_candidate.get("shadow_corpus_instance_id")
+            or ""
+        ).strip()
+        if current_instance and latest_instance and current_instance != latest_instance:
+            return None, None
+        current_last_seq = _safe_int(
+            shadow_stats.get("shadow_corpus_last_seq")
+            or shadow_stats.get("shadow_index_last_seq"),
+            0,
+        )
+        latest_last_seq = _safe_int(
+            latest_manifest.get("shadow_corpus_last_seq")
+            or latest_candidate.get("shadow_corpus_last_seq"),
+            0,
+        )
+        if current_last_seq > 0 and latest_last_seq > 0 and latest_last_seq > current_last_seq:
+            return None, None
+        return latest_count, "latest_completed_same_shadow_corpus"
+
+    def _scheduler_shadow_baseline(
+        self,
+        *,
+        state: dict[str, Any],
+        shadow_stats: dict[str, Any],
+    ) -> tuple[int, str]:
+        current_count = _safe_int(shadow_stats.get("current_shadow_entry_count"), 0)
+        raw_count = _safe_int(
+            state.get("last_trigger_shadow_entry_count"), current_count
+        )
+        current_source = str(shadow_stats.get("shadow_index_source") or "").strip()
+        state_source = str(state.get("shadow_index_source") or "").strip()
+        current_instance = str(shadow_stats.get("shadow_corpus_instance_id") or "").strip()
+        state_instance = str(state.get("shadow_corpus_instance_id") or "").strip()
+        source_mismatch = bool(current_source and state_source and current_source != state_source)
+        runtime_identity_mismatch = (
+            current_source == "runtime_analytics"
+            and current_instance
+            and state_instance
+            and current_instance != state_instance
+        )
+        count_exceeds_current = raw_count > current_count and current_count > 0
+        if source_mismatch or runtime_identity_mismatch or count_exceeds_current:
+            latest_count, latest_source = self._latest_completed_shadow_baseline(shadow_stats)
+            if latest_count is not None:
+                return latest_count, latest_source or "latest_completed_same_shadow_corpus"
+            return current_count, "current_shadow_source_reset"
+        return raw_count, "scheduler_state"
+
     def _scheduler_trigger_payload(self) -> dict[str, Any]:
         reconciliation = self._reconcile_run_state()
         shadow_stats = self._ensure_shadow_index_stats_cache_fresh_sync()
@@ -2306,11 +2386,38 @@ class PredictiveTrainerManager:
         active_model_raw_shadow_entry_count = _safe_int(
             active_model.get("raw_shadow_entry_count"), 0
         )
-        last_trigger_shadow_entry_count = _safe_int(
-            state.get("last_trigger_shadow_entry_count"), current_shadow_entry_count
+        compatibility_state = str(
+            corpus_state.get("shadow_corpus_compatibility_state") or ""
+        ).strip()
+        current_instance_id = str(
+            corpus_state.get("shadow_corpus_instance_id") or ""
+        ).strip()
+        active_instance_id = str(
+            corpus_state.get("active_model_shadow_corpus_instance_id") or ""
+        ).strip()
+        runtime_active_identity_mismatch = (
+            self._shadow_index_payload_source() == "runtime_analytics"
+            and current_instance_id
+            and active_instance_id
+            and current_instance_id != active_instance_id
+        )
+        active_model_count_comparable = (
+            compatibility_state
+            in {
+                "compatible_same_instance",
+                "compatible_same_family_active_superset",
+                "compatible_same_family_current_superset",
+            }
+            and not runtime_active_identity_mismatch
+        )
+        last_trigger_shadow_entry_count, last_trigger_shadow_entry_count_source = (
+            self._scheduler_shadow_baseline(state=state, shadow_stats=shadow_stats)
+        )
+        active_model_effective_baseline = (
+            active_model_raw_shadow_entry_count if active_model_count_comparable else 0
         )
         effective_trigger_shadow_entry_count = max(
-            last_trigger_shadow_entry_count, active_model_raw_shadow_entry_count
+            last_trigger_shadow_entry_count, active_model_effective_baseline
         )
         new_shadow_rows_since_trigger = max(
             0, current_shadow_entry_count - last_trigger_shadow_entry_count
@@ -2319,11 +2426,8 @@ class PredictiveTrainerManager:
             0, current_shadow_entry_count - effective_trigger_shadow_entry_count
         )
         shadow_row_lag_vs_active_model = max(
-            0, current_shadow_entry_count - active_model_raw_shadow_entry_count
+            0, current_shadow_entry_count - active_model_effective_baseline
         )
-        compatibility_state = str(
-            corpus_state.get("shadow_corpus_compatibility_state") or ""
-        ).strip()
         active_model_covers_current_same_family = compatibility_state in {
             "compatible_same_instance",
             "compatible_same_family_active_superset",
@@ -2398,7 +2502,9 @@ class PredictiveTrainerManager:
             "stale_reason": reconciliation["stale_reason"],
             "current_shadow_entry_count": current_shadow_entry_count,
             "active_model_raw_shadow_entry_count": active_model_raw_shadow_entry_count,
+            "active_model_shadow_count_comparable": active_model_count_comparable,
             "last_trigger_shadow_entry_count": last_trigger_shadow_entry_count,
+            "last_trigger_shadow_entry_count_source": last_trigger_shadow_entry_count_source,
             "effective_trigger_shadow_entry_count": effective_trigger_shadow_entry_count,
             "new_shadow_rows_since_trigger": new_shadow_rows_since_trigger,
             "new_shadow_rows_since_effective_baseline": new_shadow_rows_since_effective_baseline,
