@@ -3061,9 +3061,11 @@ class PredictiveTrainerManager:
         if (
             candidate_mae is not None
             and active_mae is not None
-            and candidate_mae > active_mae * self.config.calibration_mae_degradation_factor
+            and candidate_mae > active_mae
         ):
-            issues.append("global_mae_degraded")
+            issues.append("global_mae_not_additive")
+            if candidate_mae > active_mae * self.config.calibration_mae_degradation_factor:
+                issues.append("global_mae_degraded")
 
         candidate_brier = _safe_float(
             candidate_calibration.get("tradeability_head_brier", {}).get("p_positive_after_cost")
@@ -3080,21 +3082,30 @@ class PredictiveTrainerManager:
         if (
             candidate_brier is not None
             and active_brier is not None
-            and candidate_brier > active_brier * self.config.p_positive_brier_degradation_factor
+            and candidate_brier > active_brier
         ):
-            issues.append("p_positive_brier_degraded")
+            issues.append("p_positive_brier_not_additive")
+            if candidate_brier > active_brier * self.config.p_positive_brier_degradation_factor:
+                issues.append("p_positive_brier_degraded")
+        candidate_mae_improved = (
+            candidate_mae is not None and active_mae is not None and candidate_mae < active_mae
+        )
+        candidate_brier_improved = (
+            candidate_brier is not None
+            and active_brier is not None
+            and candidate_brier < active_brier
+        )
+        quality_metric_available = (candidate_mae is not None and active_mae is not None) or (
+            candidate_brier is not None and active_brier is not None
+        )
+        if not quality_metric_available:
+            issues.append("promotion_quality_metrics_missing")
+        elif not (candidate_mae_improved or candidate_brier_improved):
+            issues.append("no_quality_metric_improved")
         if row_count_gates_comparable:
             issues = row_count_issues + issues
             waived_row_count_issues: list[str] = []
         else:
-            candidate_mae_improved = (
-                candidate_mae is not None and active_mae is not None and candidate_mae < active_mae
-            )
-            candidate_brier_improved = (
-                candidate_brier is not None
-                and active_brier is not None
-                and candidate_brier < active_brier
-            )
             waived_row_count_issues = list(row_count_issues)
             if row_count_issues and not candidate_mae_improved:
                 issues.append("row_count_regression_without_mae_improvement")
