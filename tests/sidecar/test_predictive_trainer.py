@@ -434,7 +434,7 @@ def test_evaluate_candidate_accepts_one_metric_gain_without_quality_drift(
     }
     candidate_model = {
         "calibration": {
-            "global_mae_sol": 0.8,
+            "global_mae_sol": 0.82,
             "tradeability_head_brier": {"p_positive_after_cost": 0.18},
         }
     }
@@ -451,6 +451,39 @@ def test_evaluate_candidate_accepts_one_metric_gain_without_quality_drift(
 
     assert result["ok"] is True
     assert result["issues"] == []
+
+
+def test_evaluate_candidate_rejects_degraded_metric_despite_other_gain(
+    tmp_path: Path,
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    active = {
+        "training_rows": 100,
+        "shadow_rows": 90,
+        "positive_rows": 60,
+        "negative_rows": 40,
+        "calibration_global_mae_sol": 0.8,
+        "p_positive_after_cost_brier": 0.2,
+    }
+    candidate_model = {
+        "calibration": {
+            "global_mae_sol": 1.01,
+            "tradeability_head_brier": {"p_positive_after_cost": 0.18},
+        }
+    }
+    candidate_attestation = {
+        "training": {"rows": 120, "shadow_rows": 110},
+        "validation": {"positive_rows": 78, "negative_rows": 42},
+    }
+
+    result = manager._evaluate_candidate(
+        active=active,
+        candidate_model=candidate_model,
+        candidate_attestation=candidate_attestation,
+    )
+
+    assert result["ok"] is False
+    assert result["issues"] == ["global_mae_degraded"]
 
 
 def test_evaluate_candidate_waives_row_counts_for_non_comparable_runtime_corpus(
