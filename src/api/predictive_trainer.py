@@ -3058,14 +3058,14 @@ class PredictiveTrainerManager:
         if active_mae is None:
             active_mae = _safe_float(active.get("calibration_global_mae_sol"))
             active_comparison_source = "active_stored_artifact"
-        if (
+        candidate_mae_not_additive = (
             candidate_mae is not None
             and active_mae is not None
             and candidate_mae > active_mae
-        ):
-            issues.append("global_mae_not_additive")
-            if candidate_mae > active_mae * self.config.calibration_mae_degradation_factor:
-                issues.append("global_mae_degraded")
+        )
+        candidate_mae_degraded = candidate_mae_not_additive and (
+            candidate_mae > active_mae * self.config.calibration_mae_degradation_factor
+        )
 
         candidate_brier = _safe_float(
             candidate_calibration.get("tradeability_head_brier", {}).get("p_positive_after_cost")
@@ -3079,14 +3079,14 @@ class PredictiveTrainerManager:
             )
         if active_brier is None:
             active_brier = _safe_float(active.get("p_positive_after_cost_brier"))
-        if (
+        candidate_brier_not_additive = (
             candidate_brier is not None
             and active_brier is not None
             and candidate_brier > active_brier
-        ):
-            issues.append("p_positive_brier_not_additive")
-            if candidate_brier > active_brier * self.config.p_positive_brier_degradation_factor:
-                issues.append("p_positive_brier_degraded")
+        )
+        candidate_brier_degraded = candidate_brier_not_additive and (
+            candidate_brier > active_brier * self.config.p_positive_brier_degradation_factor
+        )
         candidate_mae_improved = (
             candidate_mae is not None and active_mae is not None and candidate_mae < active_mae
         )
@@ -3101,7 +3101,16 @@ class PredictiveTrainerManager:
         if not quality_metric_available:
             issues.append("promotion_quality_metrics_missing")
         elif not (candidate_mae_improved or candidate_brier_improved):
+            if candidate_mae_not_additive:
+                issues.append("global_mae_not_additive")
+            if candidate_brier_not_additive:
+                issues.append("p_positive_brier_not_additive")
             issues.append("no_quality_metric_improved")
+        else:
+            if candidate_mae_degraded:
+                issues.append("global_mae_degraded")
+            if candidate_brier_degraded:
+                issues.append("p_positive_brier_degraded")
         if row_count_gates_comparable:
             issues = row_count_issues + issues
             waived_row_count_issues: list[str] = []
