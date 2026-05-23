@@ -105,9 +105,13 @@ def _env_optional_path(*names: str) -> Path | None:
 
 def _normalize_shadow_source(value: Any) -> str:
     text = str(value or "").strip().lower()
-    if text in {"runtime", "runtime_db", "runtime_analytics"}:
+    if not text or text in {"runtime", "runtime_db", "runtime_analytics"}:
         return "runtime_analytics"
-    return "local_sqlite"
+    if text in {"local", "local_sqlite", "sqlite", "shadow_sqlite", "legacy_sqlite"}:
+        return "local_sqlite"
+    # Unknown values should not silently fall back to the legacy local corpus.
+    # Runtime analytics is the single live source of truth.
+    return "runtime_analytics"
 
 
 def _iso_from_epoch_ms(value: Any) -> str | None:
@@ -124,7 +128,9 @@ def _iso_from_epoch_ms(value: Any) -> str | None:
         return None
 
 
-def _resolved_shadow_corpus_family_id(value: Any, *, has_shadow_history: bool) -> str | None:
+def _resolved_shadow_corpus_family_id(
+    value: Any, *, has_shadow_history: bool
+) -> str | None:
     text = str(value or "").strip()
     if text:
         return text
@@ -205,7 +211,9 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
         f"{path.name}.tmp-{os.getpid()}-{threading.get_ident()}-{os.urandom(4).hex()}"
     )
     try:
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         os.replace(tmp, path)
     finally:
         with contextlib.suppress(FileNotFoundError):
@@ -375,8 +383,12 @@ def _read_runtime_shadow_stats(path: Path) -> dict[str, Any]:
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'telemetry_queue' LIMIT 1"
         ).fetchone()
         if not table_present:
-            payload["shadow_index_count_error"] = "runtime_analytics_telemetry_queue_missing"
-            payload["shadow_index_probe_error"] = "runtime_analytics_telemetry_queue_missing"
+            payload["shadow_index_count_error"] = (
+                "runtime_analytics_telemetry_queue_missing"
+            )
+            payload["shadow_index_probe_error"] = (
+                "runtime_analytics_telemetry_queue_missing"
+            )
             payload["shadow_index_count_refreshed_at"] = _utc_iso()
             return payload
         index_present = conn.execute(
@@ -544,15 +556,24 @@ class PredictiveTrainerConfig:
 
     @property
     def training_path(self) -> Path:
-        return self.algo_repo_dir / "logs/analysis/predictive_entry/prelaunch_training_latest.json"
+        return (
+            self.algo_repo_dir
+            / "logs/analysis/predictive_entry/prelaunch_training_latest.json"
+        )
 
     @property
     def calibration_path(self) -> Path:
-        return self.algo_repo_dir / "logs/analysis/predictive_entry/calibration_latest.json"
+        return (
+            self.algo_repo_dir
+            / "logs/analysis/predictive_entry/calibration_latest.json"
+        )
 
     @property
     def next_state_ledger_path(self) -> Path:
-        return self.algo_repo_dir / "logs/analysis/predictive_entry/next_state_ledger.jsonl"
+        return (
+            self.algo_repo_dir
+            / "logs/analysis/predictive_entry/next_state_ledger.jsonl"
+        )
 
     @property
     def dataset_path(self) -> Path:
@@ -560,19 +581,30 @@ class PredictiveTrainerConfig:
 
     @property
     def dataset_summary_path(self) -> Path:
-        return self.algo_repo_dir / "logs/analysis/monte_carlo/dataset_latest_summary.json"
+        return (
+            self.algo_repo_dir / "logs/analysis/monte_carlo/dataset_latest_summary.json"
+        )
 
     @property
     def shadow_index_path(self) -> Path:
-        return self.algo_repo_dir / "logs/index/predictive_candidate_firehose_shadow_outcomes.json"
+        return (
+            self.algo_repo_dir
+            / "logs/index/predictive_candidate_firehose_shadow_outcomes.json"
+        )
 
     @property
     def shadow_sqlite_path(self) -> Path:
-        return self.algo_repo_dir / "logs/index/predictive_candidate_firehose_shadow_outcomes.sqlite3"
+        return (
+            self.algo_repo_dir
+            / "logs/index/predictive_candidate_firehose_shadow_outcomes.sqlite3"
+        )
 
     @property
     def shadow_duckdb_path(self) -> Path:
-        return self.algo_repo_dir / "logs/index/predictive_candidate_firehose_shadow_outcomes.duckdb"
+        return (
+            self.algo_repo_dir
+            / "logs/index/predictive_candidate_firehose_shadow_outcomes.duckdb"
+        )
 
     @property
     def shadow_archive_root(self) -> Path:
@@ -620,12 +652,16 @@ class PredictiveTrainerConfig:
 
     @classmethod
     def from_env(cls, base_data_dir: Path) -> "PredictiveTrainerConfig":
-        algo_repo_dir = Path(
-            os.getenv(
-                "SIDECAR_PREDICTIVE_TRAINER_ALGO_REPO_DIR",
-                "/Users/sheawinkler/Documents/Projects/algotraderv2_rust",
+        algo_repo_dir = (
+            Path(
+                os.getenv(
+                    "SIDECAR_PREDICTIVE_TRAINER_ALGO_REPO_DIR",
+                    "/Users/sheawinkler/Documents/Projects/algotraderv2_rust",
+                )
             )
-        ).expanduser().resolve()
+            .expanduser()
+            .resolve()
+        )
         data_dir = Path(
             os.getenv("SIDECAR_PREDICTIVE_TRAINER_DATA_DIR", str(base_data_dir))
         ).expanduser()
@@ -639,7 +675,9 @@ class PredictiveTrainerConfig:
         if scheduler_env_raw is None:
             scheduler_config_source = "default_enabled"
         else:
-            scheduler_config_source = "env_enabled" if scheduler_enabled else "env_disabled"
+            scheduler_config_source = (
+                "env_enabled" if scheduler_enabled else "env_disabled"
+            )
         scheduler_disabled_reason = None
         if not scheduler_enabled:
             if guidance_enabled:
@@ -652,7 +690,9 @@ class PredictiveTrainerConfig:
             "SIDECAR_PREDICTIVE_TRAINER_MIN_NEW_SHADOW_ROWS"
         )
         if min_new_shadow_rows_raw is None:
-            min_new_shadow_rows_raw = os.getenv("SIDECAR_PREDICTIVE_TRAINER_TRIGGER_MIN_DELTA")
+            min_new_shadow_rows_raw = os.getenv(
+                "SIDECAR_PREDICTIVE_TRAINER_TRIGGER_MIN_DELTA"
+            )
         shadow_source = _normalize_shadow_source(os.getenv("PREDICTIVE_SHADOW_SOURCE"))
         runtime_analytics_db_path = _env_optional_path(
             "REAL_ALGOTRADER_RUNTIME_ANALYTICS_DB",
@@ -664,7 +704,8 @@ class PredictiveTrainerConfig:
             algo_repo_dir=algo_repo_dir,
             data_dir=data_dir,
             train_interval_secs=max(
-                60, _safe_int(os.getenv("SIDECAR_PREDICTIVE_TRAINER_INTERVAL_SECS"), 600)
+                60,
+                _safe_int(os.getenv("SIDECAR_PREDICTIVE_TRAINER_INTERVAL_SECS"), 600),
             ),
             scheduler_poll_secs=max(
                 15, _safe_int(os.getenv("SIDECAR_PREDICTIVE_TRAINER_POLL_SECS"), 30)
@@ -673,7 +714,9 @@ class PredictiveTrainerConfig:
             scheduler_config_source=scheduler_config_source,
             scheduler_disabled_reason=scheduler_disabled_reason,
             auto_promote=_env_bool("SIDECAR_PREDICTIVE_TRAINER_AUTO_PROMOTE", True),
-            relaunch_enabled=_env_bool("SIDECAR_PREDICTIVE_TRAINER_RELAUNCH_ENABLED", True),
+            relaunch_enabled=_env_bool(
+                "SIDECAR_PREDICTIVE_TRAINER_RELAUNCH_ENABLED", True
+            ),
             python_bin=str(
                 os.getenv("SIDECAR_PREDICTIVE_TRAINER_PYTHON", sys.executable)
             ).strip()
@@ -684,9 +727,7 @@ class PredictiveTrainerConfig:
             ),
             min_new_shadow_rows_to_trigger=max(
                 1,
-                _safe_int(
-                    min_new_shadow_rows_raw, 100
-                ),
+                _safe_int(min_new_shadow_rows_raw, 100),
             ),
             max_staleness_secs=max(
                 300,
@@ -699,7 +740,10 @@ class PredictiveTrainerConfig:
                 min(
                     0.5,
                     _safe_float(
-                        os.getenv("SIDECAR_PREDICTIVE_TRAINER_POSITIVE_SHARE_TOLERANCE"), 0.05
+                        os.getenv(
+                            "SIDECAR_PREDICTIVE_TRAINER_POSITIVE_SHARE_TOLERANCE"
+                        ),
+                        0.05,
                     )
                     or 0.05,
                 ),
@@ -731,7 +775,7 @@ class PredictiveTrainerConfig:
             ),
             shadow_archive_enabled=_env_bool(
                 "SIDECAR_PREDICTIVE_SHADOW_ARCHIVE_ENABLED",
-                _env_bool("PREDICTIVE_SHADOW_ARCHIVE_ENABLED", True),
+                _env_bool("PREDICTIVE_SHADOW_ARCHIVE_ENABLED", False),
             ),
             shadow_archive_min_interval_secs=max(
                 60,
@@ -781,7 +825,9 @@ class PredictiveTrainerManager:
         self._shadow_archive_last_attempt_monotonic: float | None = None
         self._shadow_archive_last_attempt_ok: bool | None = None
         self._guidance_subscriber_count_provider: Callable[[], int] | None = None
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sidecar-trainer")
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="sidecar-trainer"
+        )
         self._latest_manifest_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
         self._latest_manifest_cache_ttl_secs = max(
             0.25,
@@ -856,7 +902,9 @@ class PredictiveTrainerManager:
         task_exception_type: str | None = None
         task_exception_message: str | None = None
         if task is None:
-            task_state = "disabled" if not self.config.scheduler_enabled else "not_started"
+            task_state = (
+                "disabled" if not self.config.scheduler_enabled else "not_started"
+            )
         elif task.cancelled():
             task_state = "cancelled"
         elif task.done():
@@ -908,20 +956,22 @@ class PredictiveTrainerManager:
             "active_next_state_ledger_path": str(self.config.next_state_ledger_path),
             "shadow_source": self._shadow_stats_source(),
             "shadow_stats_path": str(self._shadow_stats_path()),
-            "runtime_analytics_db_path": str(self.config.runtime_analytics_db_path)
-            if self.config.runtime_analytics_db_path is not None
-            else None,
-            "shadow_index_path": str(self.config.shadow_sqlite_path),
-            "shadow_index_legacy_path": str(self.config.shadow_index_path),
-            "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
+            "runtime_analytics_db_path": (
+                str(self.config.runtime_analytics_db_path)
+                if self.config.runtime_analytics_db_path is not None
+                else None
+            ),
+            **self._shadow_store_paths_payload(),
             "shadow_archive_root": str(self.config.shadow_archive_root),
             "train_interval_secs": self.config.train_interval_secs,
             "scheduler_poll_secs": self.config.scheduler_poll_secs,
             "train_timeout_secs": self.config.train_timeout_secs,
             "shadow_max_raw_entries": self.config.shadow_max_raw_entries,
-            "shadow_snapshot_tmpdir": str(self.config.shadow_snapshot_tmpdir)
-            if self.config.shadow_snapshot_tmpdir is not None
-            else None,
+            "shadow_snapshot_tmpdir": (
+                str(self.config.shadow_snapshot_tmpdir)
+                if self.config.shadow_snapshot_tmpdir is not None
+                else None
+            ),
             "shadow_archive_enabled": self.config.shadow_archive_enabled,
             "shadow_archive_timeout_secs": self.config.shadow_archive_timeout_secs,
             "stale_running_grace_secs": self.config.stale_running_grace_secs,
@@ -952,12 +1002,12 @@ class PredictiveTrainerManager:
             "latest_run_context": self._latest_run_context_path(),
             "shadow_source": self._shadow_stats_source(),
             "shadow_stats_path": str(self._shadow_stats_path()),
-            "runtime_analytics_db_path": str(self.config.runtime_analytics_db_path)
-            if self.config.runtime_analytics_db_path is not None
-            else None,
-            "shadow_index_path": str(self.config.shadow_sqlite_path),
-            "shadow_index_legacy_path": str(self.config.shadow_index_path),
-            "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
+            "runtime_analytics_db_path": (
+                str(self.config.runtime_analytics_db_path)
+                if self.config.runtime_analytics_db_path is not None
+                else None
+            ),
+            **self._shadow_store_paths_payload(),
             "shadow_archive_root": str(self.config.shadow_archive_root),
             "shadow_archive_enabled": self.config.shadow_archive_enabled,
             "scheduler_runtime": self._scheduler_runtime_payload(),
@@ -1016,7 +1066,9 @@ class PredictiveTrainerManager:
                 pass
             await asyncio.sleep(self._snapshot_refresh_secs)
 
-    def _build_deep_snapshot_payloads_sync(self) -> tuple[dict[str, Any], dict[str, Any]]:
+    def _build_deep_snapshot_payloads_sync(
+        self,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         return self._health_payload_deep_sync(), self._status_payload_deep_sync()
 
     def _ensure_snapshot_materialized_sync(self) -> None:
@@ -1077,7 +1129,9 @@ class PredictiveTrainerManager:
                     or "stale_cached",
                     "shadow_index_probe_error": payload.get("shadow_index_probe_error")
                     or payload.get("shadow_index_count_error"),
-                    "shadow_corpus_instance_id": payload.get("shadow_corpus_instance_id"),
+                    "shadow_corpus_instance_id": payload.get(
+                        "shadow_corpus_instance_id"
+                    ),
                     "shadow_corpus_created_at": payload.get("shadow_corpus_created_at"),
                     "shadow_corpus_family_id": _resolved_shadow_corpus_family_id(
                         payload.get("shadow_corpus_family_id"),
@@ -1095,9 +1149,10 @@ class PredictiveTrainerManager:
                     != self._shadow_index_payload_source()
                 ):
                     return self._read_shadow_stats_sync()
-                if cached["shadow_index_count_refreshed_at"] is not None or cached[
-                    "current_shadow_entry_count"
-                ] > 0:
+                if (
+                    cached["shadow_index_count_refreshed_at"] is not None
+                    or cached["current_shadow_entry_count"] > 0
+                ):
                     return cached
         return self._read_shadow_stats_sync()
 
@@ -1105,7 +1160,9 @@ class PredictiveTrainerManager:
         self, stats: dict[str, Any] | None = None
     ) -> float | None:
         payload = stats or self._shadow_index_stats_cache
-        refreshed_at = _parse_utc_ts(str(payload.get("shadow_index_count_refreshed_at") or ""))
+        refreshed_at = _parse_utc_ts(
+            str(payload.get("shadow_index_count_refreshed_at") or "")
+        )
         if refreshed_at is None:
             return None
         return max(0.0, (_utc_now() - refreshed_at).total_seconds())
@@ -1156,7 +1213,9 @@ class PredictiveTrainerManager:
         self, stats: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         payload = dict(stats or self._shadow_index_stats_cache)
-        payload["shadow_index_probe_age_secs"] = self._shadow_index_probe_age_secs(payload)
+        payload["shadow_index_probe_age_secs"] = self._shadow_index_probe_age_secs(
+            payload
+        )
         return payload
 
     def _ensure_shadow_index_stats_cache_fresh_sync(
@@ -1180,7 +1239,9 @@ class PredictiveTrainerManager:
         return self._shadow_index_public_payload(stats)
 
     async def _refresh_shadow_index_stats_cache(self) -> dict[str, Any]:
-        return await self._run_sync_on_executor(self._refresh_shadow_index_stats_cache_sync)
+        return await self._run_sync_on_executor(
+            self._refresh_shadow_index_stats_cache_sync
+        )
 
     def _shadow_archive_manifest(self) -> dict[str, Any] | None:
         return _latest_archive_manifest(self.config.shadow_archive_root)
@@ -1223,7 +1284,8 @@ class PredictiveTrainerManager:
         current_instance_id = str(stats.get("shadow_corpus_instance_id") or "").strip()
         current_family_id = _resolved_shadow_corpus_family_id(
             stats.get("shadow_corpus_family_id"),
-            has_shadow_history=_safe_int(stats.get("current_shadow_entry_count"), 0) > 0,
+            has_shadow_history=_safe_int(stats.get("current_shadow_entry_count"), 0)
+            > 0,
         )
         current_last_seq = _safe_int(
             stats.get("shadow_corpus_last_seq") or stats.get("shadow_index_last_seq"), 0
@@ -1233,19 +1295,25 @@ class PredictiveTrainerManager:
         active_family_id = _resolved_shadow_corpus_family_id(
             model.get("shadow_corpus_family_id"),
             has_shadow_history=_safe_int(
-                model.get("shadow_corpus_entry_count") or model.get("raw_shadow_entry_count"), 0
+                model.get("shadow_corpus_entry_count")
+                or model.get("raw_shadow_entry_count"),
+                0,
             )
             > 0,
         )
         active_last_seq = _safe_int(model.get("shadow_corpus_last_seq"), 0)
         active_entry_count = _safe_int(
-            model.get("shadow_corpus_entry_count") or model.get("raw_shadow_entry_count"), 0
+            model.get("shadow_corpus_entry_count")
+            or model.get("raw_shadow_entry_count"),
+            0,
         )
         latest_manifest = latest_completed_manifest or self._latest_manifest_summary(
             status="completed"
         )
         latest_candidate = (
-            dict((latest_manifest or {}).get("candidate_model") or {}) if latest_manifest else {}
+            dict((latest_manifest or {}).get("candidate_model") or {})
+            if latest_manifest
+            else {}
         )
         latest_instance_id = str(
             latest_candidate.get("shadow_corpus_instance_id") or ""
@@ -1271,17 +1339,36 @@ class PredictiveTrainerManager:
         if current_probe_state != "available":
             consistency_state = "unavailable"
             integrity_reason = "shadow_index_unavailable"
-        elif current_instance_id and active_instance_id and current_instance_id != active_instance_id:
+        elif (
+            current_instance_id
+            and active_instance_id
+            and current_instance_id != active_instance_id
+        ):
             consistency_state = "recreated"
             integrity_reason = "current_corpus_differs_from_active_model"
-        elif latest_entry_count > 0 and latest_instance_id and current_instance_id and latest_instance_id != current_instance_id:
+        elif (
+            latest_entry_count > 0
+            and latest_instance_id
+            and current_instance_id
+            and latest_instance_id != current_instance_id
+        ):
             consistency_state = "recreated"
             integrity_reason = "current_corpus_differs_from_latest_completed_run"
-        elif current_instance_id and active_instance_id and current_instance_id == active_instance_id:
+        elif (
+            current_instance_id
+            and active_instance_id
+            and current_instance_id == active_instance_id
+        ):
             consistency_state = "consistent"
-        elif current_instance_id and latest_instance_id and current_instance_id == latest_instance_id:
+        elif (
+            current_instance_id
+            and latest_instance_id
+            and current_instance_id == latest_instance_id
+        ):
             consistency_state = "consistent"
-        elif current_entry_count > 0 and (active_entry_count > 0 or latest_entry_count > 0):
+        elif current_entry_count > 0 and (
+            active_entry_count > 0 or latest_entry_count > 0
+        ):
             consistency_state = "unknown"
             integrity_reason = "coverage_identity_unproven"
 
@@ -1325,7 +1412,11 @@ class PredictiveTrainerManager:
             compatibility_state = "compatible_same_family_current_superset"
             compatibility_reason = "current_corpus_newer_same_family"
 
-        if compatibility_state in {"compatible_same_instance", "compatible_same_family_active_superset", "compatible_same_family_current_superset"}:
+        if compatibility_state in {
+            "compatible_same_instance",
+            "compatible_same_family_active_superset",
+            "compatible_same_family_current_superset",
+        }:
             integrity_reason = None
         elif compatibility_state in {"unavailable", "unknown", "incompatible_family"}:
             integrity_reason = compatibility_reason
@@ -1340,18 +1431,42 @@ class PredictiveTrainerManager:
             "shadow_corpus_integrity_reason": integrity_reason,
             "shadow_corpus_compatibility_state": compatibility_state,
             "shadow_corpus_compatibility_reason": compatibility_reason,
-            "shadow_corpus_durability_state": self._shadow_corpus_durability_state(stats),
+            "shadow_corpus_durability_state": self._shadow_corpus_durability_state(
+                stats
+            ),
             "active_model_shadow_corpus_instance_id": active_instance_id or None,
             "active_model_shadow_corpus_family_id": active_family_id,
             "active_model_shadow_corpus_last_seq": active_last_seq,
-            "latest_completed_run_shadow_corpus_instance_id": latest_instance_id or None,
+            "latest_completed_run_shadow_corpus_instance_id": latest_instance_id
+            or None,
             "latest_completed_run_shadow_corpus_family_id": latest_family_id,
             "latest_completed_run_shadow_corpus_last_seq": latest_last_seq,
+        }
+
+    def _shadow_store_paths_payload(self) -> dict[str, Any]:
+        if self._shadow_stats_source() == "runtime_analytics":
+            return {
+                "shadow_index_path": str(self._shadow_stats_path()),
+                "shadow_index_legacy_path": None,
+                "shadow_duckdb_path": None,
+                "shadow_local_sqlite_path": str(self.config.shadow_sqlite_path),
+                "shadow_local_json_path": str(self.config.shadow_index_path),
+                "shadow_local_duckdb_path": str(self.config.shadow_duckdb_path),
+            }
+        return {
+            "shadow_index_path": str(self.config.shadow_sqlite_path),
+            "shadow_index_legacy_path": str(self.config.shadow_index_path),
+            "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
+            "shadow_local_sqlite_path": str(self.config.shadow_sqlite_path),
+            "shadow_local_json_path": str(self.config.shadow_index_path),
+            "shadow_local_duckdb_path": str(self.config.shadow_duckdb_path),
         }
 
     def _archive_shadow_corpus_sync(self) -> dict[str, Any]:
         if not self.config.shadow_archive_enabled:
             return {"ok": False, "reason": "archive_disabled"}
+        if self._shadow_stats_source() == "runtime_analytics":
+            return {"ok": False, "reason": "archive_disabled_for_runtime_analytics"}
         if not self.config.archive_shadow_script_path.exists():
             return {"ok": False, "reason": "archive_script_missing"}
         cmd = [
@@ -1372,8 +1487,16 @@ class PredictiveTrainerManager:
                 timeout=self.config.shadow_archive_timeout_secs,
             )
         except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-            stderr = exc.stderr.decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            stdout = (
+                exc.stdout.decode("utf-8", "replace")
+                if isinstance(exc.stdout, bytes)
+                else (exc.stdout or "")
+            )
+            stderr = (
+                exc.stderr.decode("utf-8", "replace")
+                if isinstance(exc.stderr, bytes)
+                else (exc.stderr or "")
+            )
             return {
                 "ok": False,
                 "reason": "archive_command_timeout",
@@ -1392,11 +1515,23 @@ class PredictiveTrainerManager:
         try:
             payload = json.loads(result.stdout.strip() or "{}")
         except Exception:
-            payload = {"ok": False, "reason": "archive_invalid_json", "stdout": result.stdout.strip()}
-        return payload if isinstance(payload, dict) else {"ok": False, "reason": "archive_invalid_payload"}
+            payload = {
+                "ok": False,
+                "reason": "archive_invalid_json",
+                "stdout": result.stdout.strip(),
+            }
+        return (
+            payload
+            if isinstance(payload, dict)
+            else {"ok": False, "reason": "archive_invalid_payload"}
+        )
 
-    def _maybe_archive_shadow_corpus_sync(self, *, force: bool = False) -> dict[str, Any] | None:
+    def _maybe_archive_shadow_corpus_sync(
+        self, *, force: bool = False
+    ) -> dict[str, Any] | None:
         if not self.config.shadow_archive_enabled:
+            return None
+        if self._shadow_stats_source() == "runtime_analytics":
             return None
         if not force:
             last_attempt = self._shadow_archive_last_attempt_monotonic
@@ -1405,8 +1540,12 @@ class PredictiveTrainerManager:
                 if elapsed < float(self.config.shadow_archive_min_interval_secs):
                     return None
         shadow_stats = self._ensure_shadow_index_stats_cache_fresh_sync(force=force)
-        current_entry_count = _safe_int(shadow_stats.get("current_shadow_entry_count"), 0)
-        current_instance_id = str(shadow_stats.get("shadow_corpus_instance_id") or "").strip()
+        current_entry_count = _safe_int(
+            shadow_stats.get("current_shadow_entry_count"), 0
+        )
+        current_instance_id = str(
+            shadow_stats.get("shadow_corpus_instance_id") or ""
+        ).strip()
         if current_entry_count <= 0 or not current_instance_id:
             return None
         latest_archive = self._shadow_archive_manifest()
@@ -1431,7 +1570,11 @@ class PredictiveTrainerManager:
         self._append_history(
             {
                 "timestamp": _utc_iso(),
-                "event": "shadow_corpus_archived" if result.get("ok") else "shadow_corpus_archive_failed",
+                "event": (
+                    "shadow_corpus_archived"
+                    if result.get("ok")
+                    else "shadow_corpus_archive_failed"
+                ),
                 "shadow_corpus_entry_count": current_entry_count,
                 "result": result,
             }
@@ -1491,9 +1634,11 @@ class PredictiveTrainerManager:
                     stage="cancelled",
                     stage_message="sidecar shutdown cancelled in-progress trainer run",
                     dataset_rows=active_manifest.get("dataset_rows"),
-                    dataset_summary_path=Path(active_manifest["dataset_summary_path"])
-                    if active_manifest.get("dataset_summary_path")
-                    else None,
+                    dataset_summary_path=(
+                        Path(active_manifest["dataset_summary_path"])
+                        if active_manifest.get("dataset_summary_path")
+                        else None
+                    ),
                 )
                 active_manifest["error"] = {
                     "type": "TrainerShutdown",
@@ -1522,7 +1667,9 @@ class PredictiveTrainerManager:
                 trigger = self._scheduler_trigger_payload()
                 if trigger.get("should_start"):
                     await self.start_run(
-                        requested_by=str(trigger.get("requested_by") or "scheduler_auto"),
+                        requested_by=str(
+                            trigger.get("requested_by") or "scheduler_auto"
+                        ),
                         auto_promote=None,
                     )
                 self._scheduler_cycle_ok_count += 1
@@ -1566,10 +1713,13 @@ class PredictiveTrainerManager:
             return False
         if self._trainer_process_alive_for_run(self._active_run_id):
             return True
-        return self._running_manifest_recovery_hold(
-            self._active_run_id,
-            active_manifest,
-        ) is not None
+        return (
+            self._running_manifest_recovery_hold(
+                self._active_run_id,
+                active_manifest,
+            )
+            is not None
+        )
 
     def _terminal_manifest_status(self, status: Any) -> bool:
         return str(status or "").strip().lower() in {"completed", "failed", "cancelled"}
@@ -1663,7 +1813,9 @@ class PredictiveTrainerManager:
             if latest_run_id and self._trainer_process_alive_for_run(latest_run_id):
                 self._active_run_id = latest_run_id
                 reconciliation["external_running_state"] = True
-                reconciliation["stale_reason"] = "running_manifest_has_live_trainer_process"
+                reconciliation["stale_reason"] = (
+                    "running_manifest_has_live_trainer_process"
+                )
                 return reconciliation
             recovery_hold = self._running_manifest_recovery_hold(
                 latest_run_id,
@@ -1716,9 +1868,13 @@ class PredictiveTrainerManager:
         with self._state_io_lock:
             _append_jsonl(self.config.history_path, payload)
 
-    async def _run_sync_on_executor(self, func: Any, /, *args: Any, **kwargs: Any) -> Any:
+    async def _run_sync_on_executor(
+        self, func: Any, /, *args: Any, **kwargs: Any
+    ) -> Any:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, partial(func, *args, **kwargs))
+        return await loop.run_in_executor(
+            self._executor, partial(func, *args, **kwargs)
+        )
 
     def _run_dir(self, run_id: str) -> Path:
         return self.config.runs_dir / run_id
@@ -1784,13 +1940,19 @@ class PredictiveTrainerManager:
                 "train_interval_secs": self.config.train_interval_secs,
                 "scheduler_poll_secs": self.config.scheduler_poll_secs,
                 "scheduler_enabled": self.config.scheduler_enabled,
-                "auto_promote": self.config.auto_promote if auto_promote is None else bool(auto_promote),
+                "auto_promote": (
+                    self.config.auto_promote
+                    if auto_promote is None
+                    else bool(auto_promote)
+                ),
                 "relaunch_enabled": self.config.relaunch_enabled,
                 "train_timeout_secs": self.config.train_timeout_secs,
                 "shadow_max_raw_entries": self.config.shadow_max_raw_entries,
-                "shadow_snapshot_tmpdir": str(self.config.shadow_snapshot_tmpdir)
-                if self.config.shadow_snapshot_tmpdir is not None
-                else None,
+                "shadow_snapshot_tmpdir": (
+                    str(self.config.shadow_snapshot_tmpdir)
+                    if self.config.shadow_snapshot_tmpdir is not None
+                    else None
+                ),
                 "shadow_archive_enabled": self.config.shadow_archive_enabled,
                 "shadow_archive_timeout_secs": self.config.shadow_archive_timeout_secs,
                 "stale_running_grace_secs": self.config.stale_running_grace_secs,
@@ -1810,7 +1972,11 @@ class PredictiveTrainerManager:
             "artifacts": {},
             "promotion": {
                 "state": "not_attempted",
-                "auto_promote_requested": self.config.auto_promote if auto_promote is None else bool(auto_promote),
+                "auto_promote_requested": (
+                    self.config.auto_promote
+                    if auto_promote is None
+                    else bool(auto_promote)
+                ),
             },
             "raw_shadow_entry_count": _safe_int(
                 self._shadow_index_stats_cache.get("current_shadow_entry_count"), 0
@@ -1868,7 +2034,9 @@ class PredictiveTrainerManager:
         return {
             "model_candidate_exists": _path_exists_text(paths["model_candidate"]),
             "training_candidate_exists": _path_exists_text(paths["training_candidate"]),
-            "calibration_candidate_exists": _path_exists_text(paths["calibration_candidate"]),
+            "calibration_candidate_exists": _path_exists_text(
+                paths["calibration_candidate"]
+            ),
             "eval_pack_exists": _path_exists_text(paths["eval_pack_json"]),
             "promotion_record_exists": _path_exists_text(paths["promotion_record"]),
         }
@@ -1890,7 +2058,9 @@ class PredictiveTrainerManager:
             with contextlib.suppress(Exception):
                 candidates.append(
                     (
-                        datetime.fromtimestamp(artifact_path.stat().st_mtime, timezone.utc),
+                        datetime.fromtimestamp(
+                            artifact_path.stat().st_mtime, timezone.utc
+                        ),
                         f"artifact:{artifact_name}",
                     )
                 )
@@ -1973,7 +2143,9 @@ class PredictiveTrainerManager:
         manifest.update(self._artifact_existence_flags(run_id))
         return manifest
 
-    def _manifest_for_status(self, run_id: str, manifest: dict[str, Any] | None) -> dict[str, Any] | None:
+    def _manifest_for_status(
+        self, run_id: str, manifest: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
         if manifest is None:
             return None
         payload = dict(manifest)
@@ -1986,7 +2158,9 @@ class PredictiveTrainerManager:
             return None
         run_id = self._active_run_id
         manifest = self._read_manifest_if_exists(run_id)
-        if manifest is not None and self._terminal_manifest_status(manifest.get("status")):
+        if manifest is not None and self._terminal_manifest_status(
+            manifest.get("status")
+        ):
             return None
         active_run = self._manifest_for_status(run_id, manifest)
         return {
@@ -2001,7 +2175,9 @@ class PredictiveTrainerManager:
             "model_freshness_state": "running_catching_up",
         }
 
-    def _suppress_scheduler_trigger_while_running(self, payload: dict[str, Any]) -> None:
+    def _suppress_scheduler_trigger_while_running(
+        self, payload: dict[str, Any]
+    ) -> None:
         trigger = dict(payload.get("scheduler_trigger") or {})
         trigger["should_start"] = False
         trigger["requested_by"] = None
@@ -2031,7 +2207,9 @@ class PredictiveTrainerManager:
             env["PREDICTIVE_SHADOW_SNAPSHOT_TMPDIR"] = str(
                 self.config.shadow_snapshot_tmpdir
             )
-        with stdout_path.open("w", encoding="utf-8", buffering=1) as stdout_fh, stderr_path.open(
+        with stdout_path.open(
+            "w", encoding="utf-8", buffering=1
+        ) as stdout_fh, stderr_path.open(
             "w", encoding="utf-8", buffering=1
         ) as stderr_fh:
             process = subprocess.Popen(
@@ -2050,7 +2228,10 @@ class PredictiveTrainerManager:
                     returncode = process.poll()
                     if returncode is not None:
                         break
-                    if timeout is not None and (time.monotonic() - started_monotonic) >= timeout:
+                    if (
+                        timeout is not None
+                        and (time.monotonic() - started_monotonic) >= timeout
+                    ):
                         process.kill()
                         with contextlib.suppress(Exception):
                             process.wait(timeout=5)
@@ -2060,8 +2241,12 @@ class PredictiveTrainerManager:
                 with self._state_io_lock:
                     if self._active_subprocess is process:
                         self._active_subprocess = None
-        stdout_text = stdout_path.read_text(encoding="utf-8") if stdout_path.exists() else ""
-        stderr_text = stderr_path.read_text(encoding="utf-8") if stderr_path.exists() else ""
+        stdout_text = (
+            stdout_path.read_text(encoding="utf-8") if stdout_path.exists() else ""
+        )
+        stderr_text = (
+            stderr_path.read_text(encoding="utf-8") if stderr_path.exists() else ""
+        )
         return returncode, stdout_text, stderr_text
 
     def _python_cmd(self, script_path: Path, *args: str) -> list[str]:
@@ -2213,7 +2398,9 @@ class PredictiveTrainerManager:
             return pid
         return None
 
-    def _latest_manifest_summary(self, *, status: str | None = None) -> dict[str, Any] | None:
+    def _latest_manifest_summary(
+        self, *, status: str | None = None
+    ) -> dict[str, Any] | None:
         cache_key = (status or "__any__").strip().lower()
         now_monotonic = time.monotonic()
         with self._state_io_lock:
@@ -2221,7 +2408,9 @@ class PredictiveTrainerManager:
             if cached_entry is not None:
                 cache_ts, cache_payload = cached_entry
                 if (now_monotonic - cache_ts) <= self._latest_manifest_cache_ttl_secs:
-                    return dict(cache_payload) if isinstance(cache_payload, dict) else None
+                    return (
+                        dict(cache_payload) if isinstance(cache_payload, dict) else None
+                    )
             manifests = sorted(
                 self.config.runs_dir.glob("*/manifest.json"),
                 key=lambda path: path.stat().st_mtime,
@@ -2234,7 +2423,10 @@ class PredictiveTrainerManager:
                     continue
                 if not isinstance(payload, dict):
                     continue
-                if status is not None and str(payload.get("status") or "").strip().lower() != status:
+                if (
+                    status is not None
+                    and str(payload.get("status") or "").strip().lower() != status
+                ):
                     continue
                 payload_copy = dict(payload)
                 self._latest_manifest_cache[cache_key] = (now_monotonic, payload_copy)
@@ -2244,7 +2436,9 @@ class PredictiveTrainerManager:
 
     def _default_scheduler_state(self) -> dict[str, Any]:
         shadow_stats = self._read_shadow_stats_sync()
-        current_shadow_entries = _safe_int(shadow_stats.get("current_shadow_entry_count"), 0)
+        current_shadow_entries = _safe_int(
+            shadow_stats.get("current_shadow_entry_count"), 0
+        )
         latest_manifest = self._latest_manifest_summary()
         if latest_manifest:
             return {
@@ -2253,7 +2447,8 @@ class PredictiveTrainerManager:
                 "last_run_started_at": latest_manifest.get("started_at") or _utc_iso(),
                 "last_trigger_reason": "bootstrap_latest_manifest",
                 "last_trigger_shadow_entry_count": _safe_int(
-                    latest_manifest.get("raw_shadow_entry_count"), current_shadow_entries
+                    latest_manifest.get("raw_shadow_entry_count"),
+                    current_shadow_entries,
                 ),
                 **shadow_stats,
             }
@@ -2315,7 +2510,9 @@ class PredictiveTrainerManager:
         )
         if current_family and latest_family and current_family != latest_family:
             return None, None
-        current_instance = str(shadow_stats.get("shadow_corpus_instance_id") or "").strip()
+        current_instance = str(
+            shadow_stats.get("shadow_corpus_instance_id") or ""
+        ).strip()
         latest_instance = str(
             latest_manifest.get("shadow_corpus_instance_id")
             or latest_candidate.get("shadow_corpus_instance_id")
@@ -2333,7 +2530,11 @@ class PredictiveTrainerManager:
             or latest_candidate.get("shadow_corpus_last_seq"),
             0,
         )
-        if current_last_seq > 0 and latest_last_seq > 0 and latest_last_seq > current_last_seq:
+        if (
+            current_last_seq > 0
+            and latest_last_seq > 0
+            and latest_last_seq > current_last_seq
+        ):
             return None, None
         return latest_count, "latest_completed_same_shadow_corpus"
 
@@ -2349,9 +2550,13 @@ class PredictiveTrainerManager:
         )
         current_source = str(shadow_stats.get("shadow_index_source") or "").strip()
         state_source = str(state.get("shadow_index_source") or "").strip()
-        current_instance = str(shadow_stats.get("shadow_corpus_instance_id") or "").strip()
+        current_instance = str(
+            shadow_stats.get("shadow_corpus_instance_id") or ""
+        ).strip()
         state_instance = str(state.get("shadow_corpus_instance_id") or "").strip()
-        source_mismatch = bool(current_source and state_source and current_source != state_source)
+        source_mismatch = bool(
+            current_source and state_source and current_source != state_source
+        )
         runtime_identity_mismatch = (
             current_source == "runtime_analytics"
             and current_instance
@@ -2360,9 +2565,14 @@ class PredictiveTrainerManager:
         )
         count_exceeds_current = raw_count > current_count and current_count > 0
         if source_mismatch or runtime_identity_mismatch or count_exceeds_current:
-            latest_count, latest_source = self._latest_completed_shadow_baseline(shadow_stats)
+            latest_count, latest_source = self._latest_completed_shadow_baseline(
+                shadow_stats
+            )
             if latest_count is not None:
-                return latest_count, latest_source or "latest_completed_same_shadow_corpus"
+                return (
+                    latest_count,
+                    latest_source or "latest_completed_same_shadow_corpus",
+                )
             return current_count, "current_shadow_source_reset"
         return raw_count, "scheduler_state"
 
@@ -2432,8 +2642,12 @@ class PredictiveTrainerManager:
             "compatible_same_instance",
             "compatible_same_family_active_superset",
         }
-        corpus_advanced_beyond_active_model = compatibility_state == "compatible_same_family_current_superset"
-        last_run_started_at = str(state.get("last_run_started_at") or "").strip() or None
+        corpus_advanced_beyond_active_model = (
+            compatibility_state == "compatible_same_family_current_superset"
+        )
+        last_run_started_at = (
+            str(state.get("last_run_started_at") or "").strip() or None
+        )
         last_started_dt = _parse_utc_ts(last_run_started_at)
         seconds_since_last_run_started: float | None = None
         if last_started_dt is not None:
@@ -2449,7 +2663,8 @@ class PredictiveTrainerManager:
             or seconds_since_last_run_started >= self.config.max_staleness_secs
         )
         row_threshold_reached = (
-            new_shadow_rows_since_effective_baseline >= self.config.min_new_shadow_rows_to_trigger
+            new_shadow_rows_since_effective_baseline
+            >= self.config.min_new_shadow_rows_to_trigger
         )
         last_run_id = str(state.get("last_run_id") or "").strip()
         last_manifest = self._read_manifest_if_exists(last_run_id)
@@ -2531,12 +2746,12 @@ class PredictiveTrainerManager:
             "shadow_index_count_refreshed_at": shadow_stats.get(
                 "shadow_index_count_refreshed_at"
             ),
-            "shadow_index_count_error": shadow_stats.get(
-                "shadow_index_count_error"
-            ),
+            "shadow_index_count_error": shadow_stats.get("shadow_index_count_error"),
             "shadow_index_probe_state": shadow_index_probe_state,
             "shadow_index_probe_error": shadow_stats.get("shadow_index_probe_error"),
-            "shadow_index_probe_age_secs": shadow_stats.get("shadow_index_probe_age_secs"),
+            "shadow_index_probe_age_secs": shadow_stats.get(
+                "shadow_index_probe_age_secs"
+            ),
             "shadow_index_size_bytes": _safe_int(
                 shadow_stats.get("shadow_index_size_bytes"), 0
             ),
@@ -2560,7 +2775,9 @@ class PredictiveTrainerManager:
                 "last_requested_by": requested_by,
                 "last_run_started_at": _utc_iso(),
                 "last_trigger_reason": requested_by,
-                "last_trigger_shadow_entry_count": trigger.get("current_shadow_entry_count"),
+                "last_trigger_shadow_entry_count": trigger.get(
+                    "current_shadow_entry_count"
+                ),
                 "shadow_corpus_instance_id": trigger.get("shadow_corpus_instance_id"),
                 "shadow_corpus_created_at": trigger.get("shadow_corpus_created_at"),
                 "shadow_corpus_family_id": trigger.get("shadow_corpus_family_id"),
@@ -2600,9 +2817,15 @@ class PredictiveTrainerManager:
         return {
             "ok": True,
             "reason": "analyzed",
-            "open_positions_remaining": _safe_int(payload.get("open_positions_remaining"), 0),
-            "positions_closed_total": _safe_int(payload.get("positions_closed_total"), 0),
-            "total_net_sol": _safe_float(payload.get("summary", {}).get("total_net_sol")),
+            "open_positions_remaining": _safe_int(
+                payload.get("open_positions_remaining"), 0
+            ),
+            "positions_closed_total": _safe_int(
+                payload.get("positions_closed_total"), 0
+            ),
+            "total_net_sol": _safe_float(
+                payload.get("summary", {}).get("total_net_sol")
+            ),
             "run_start": started_at,
         }
 
@@ -2672,7 +2895,9 @@ class PredictiveTrainerManager:
             "untracked_examples": untracked[:10],
             "head": head,
             "origin_main": origin_main,
-            "head_matches_origin_main": bool(head and origin_main and head == origin_main),
+            "head_matches_origin_main": bool(
+                head and origin_main and head == origin_main
+            ),
             "origin_main_refreshed": fetch_status == "ok",
             "git_fetch_status": fetch_status,
             "git_fetch_error": fetch_error,
@@ -2681,7 +2906,9 @@ class PredictiveTrainerManager:
         }
 
     def _active_artifacts(self) -> dict[str, Any]:
-        def _read_runtime_json(path: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        def _read_runtime_json(
+            path: Path,
+        ) -> tuple[dict[str, Any], dict[str, Any] | None]:
             if not path.exists():
                 return {}, None
             try:
@@ -2702,7 +2929,9 @@ class PredictiveTrainerManager:
 
         model, model_read_error = _read_runtime_json(self.config.model_path)
         training, training_read_error = _read_runtime_json(self.config.training_path)
-        calibration, calibration_read_error = _read_runtime_json(self.config.calibration_path)
+        calibration, calibration_read_error = _read_runtime_json(
+            self.config.calibration_path
+        )
         training_section = training.get("training") or {}
         validation_section = training.get("validation") or {}
         data_quality = model.get("data_quality") or {}
@@ -2715,10 +2944,13 @@ class PredictiveTrainerManager:
             "training_read_error": training_read_error,
             "calibration_read_error": calibration_read_error,
             "training_rows": _safe_int(
-                training_section.get("rows"), _safe_int(data_quality.get("row_count"), 0)
+                training_section.get("rows"),
+                _safe_int(data_quality.get("row_count"), 0),
             ),
             "shadow_rows": _safe_int(training_section.get("shadow_rows"), 0),
-            "raw_shadow_entry_count": _safe_int(training_section.get("raw_shadow_entry_count"), 0),
+            "raw_shadow_entry_count": _safe_int(
+                training_section.get("raw_shadow_entry_count"), 0
+            ),
             "executed_rows": _safe_int(training_section.get("executed_rows"), 0),
             "positive_rows": _safe_int(
                 validation_section.get("positive_rows"),
@@ -2765,9 +2997,7 @@ class PredictiveTrainerManager:
                 or training_section.get("shadow_corpus_last_seq"),
                 0,
             ),
-            "shadow_corpus_snapshot_sha256": model.get(
-                "shadow_corpus_snapshot_sha256"
-            )
+            "shadow_corpus_snapshot_sha256": model.get("shadow_corpus_snapshot_sha256")
             or training_section.get("shadow_corpus_snapshot_sha256"),
             "shadow_corpus_durability_state": model.get(
                 "shadow_corpus_durability_state"
@@ -2812,19 +3042,25 @@ class PredictiveTrainerManager:
         if not pending_restart:
             return None, effective_promotion_state
 
-        pending_run_id = str(
-            pending_restart.get("run_id") or latest_completed_run_id or ""
-        ).strip() or None
+        pending_run_id = (
+            str(pending_restart.get("run_id") or latest_completed_run_id or "").strip()
+            or None
+        )
         live_state = self._current_open_positions(
             self._run_dir(pending_run_id or "status")
         )
-        open_positions_remaining = _safe_int(live_state.get("open_positions_remaining"), 0)
+        open_positions_remaining = _safe_int(
+            live_state.get("open_positions_remaining"), 0
+        )
         repo_state = dict(repo_state or self._repo_launch_ready())
         promoted_model_is_active = bool(
             latest_completed_run_raw_shadow_entry_count > 0
-            and active_model_raw_shadow_entry_count >= latest_completed_run_raw_shadow_entry_count
+            and active_model_raw_shadow_entry_count
+            >= latest_completed_run_raw_shadow_entry_count
         )
-        current_model_is_serving = self._guidance_subscriber_count() > 0 or promoted_model_is_active
+        current_model_is_serving = (
+            self._guidance_subscriber_count() > 0 or promoted_model_is_active
+        )
 
         if open_positions_remaining > 0:
             pending_restart = {
@@ -2873,7 +3109,9 @@ class PredictiveTrainerManager:
                 pass
         rows = 0
         if self.config.dataset_path.exists():
-            with self.config.dataset_path.open("r", encoding="utf-8", errors="ignore") as fh:
+            with self.config.dataset_path.open(
+                "r", encoding="utf-8", errors="ignore"
+            ) as fh:
                 rows = sum(1 for line in fh if line.strip())
         return {
             "rows": rows,
@@ -2900,8 +3138,12 @@ class PredictiveTrainerManager:
         attestation = {
             "artifacts": {
                 "dataset_path": _path_text(dataset_path, self.config.algo_repo_dir),
-                "dataset_summary_path": _path_text(dataset_summary_path, self.config.algo_repo_dir),
-                "model_path": _path_text(self.config.model_path, self.config.algo_repo_dir),
+                "dataset_summary_path": _path_text(
+                    dataset_summary_path, self.config.algo_repo_dir
+                ),
+                "model_path": _path_text(
+                    self.config.model_path, self.config.algo_repo_dir
+                ),
             },
             "dataset": {
                 "ok": bool(dataset_summary.get("ok", False)),
@@ -2931,17 +3173,32 @@ class PredictiveTrainerManager:
                     _safe_int(executed_quality.get("row_count"), 0),
                 ),
                 "output": str(candidate_output_hint),
-                "reason_groups": ["dead_timeout", "trailing_stop", "liquidity_collapse", "stop_loss", "other"],
-                "rows": _safe_int(training_window.get("rows"), _safe_int(data_quality.get("row_count"), 0)),
+                "reason_groups": [
+                    "dead_timeout",
+                    "trailing_stop",
+                    "liquidity_collapse",
+                    "stop_loss",
+                    "other",
+                ],
+                "rows": _safe_int(
+                    training_window.get("rows"),
+                    _safe_int(data_quality.get("row_count"), 0),
+                ),
                 "raw_shadow_entry_count": _safe_int(
                     model.get("raw_shadow_entry_count"),
-                    _safe_int(self._shadow_index_stats_cache.get("current_shadow_entry_count"), 0),
+                    _safe_int(
+                        self._shadow_index_stats_cache.get(
+                            "current_shadow_entry_count"
+                        ),
+                        0,
+                    ),
                 ),
                 "shadow_corpus_instance_id": model.get("shadow_corpus_instance_id"),
                 "shadow_corpus_created_at": model.get("shadow_corpus_created_at"),
                 "shadow_corpus_family_id": _resolved_shadow_corpus_family_id(
                     model.get("shadow_corpus_family_id"),
-                    has_shadow_history=_safe_int(model.get("raw_shadow_entry_count"), 0) > 0,
+                    has_shadow_history=_safe_int(model.get("raw_shadow_entry_count"), 0)
+                    > 0,
                 ),
                 "shadow_corpus_entry_count": _safe_int(
                     model.get("shadow_corpus_entry_count"),
@@ -2978,8 +3235,12 @@ class PredictiveTrainerManager:
             "validation": {
                 "issues": [],
                 "model_version": version,
-                "negative_rows": _safe_int(data_quality.get("negative_net_sol_count"), 0),
-                "positive_rows": _safe_int(data_quality.get("positive_net_sol_count"), 0),
+                "negative_rows": _safe_int(
+                    data_quality.get("negative_net_sol_count"), 0
+                ),
+                "positive_rows": _safe_int(
+                    data_quality.get("positive_net_sol_count"), 0
+                ),
                 "trained_at": model.get("trained_at"),
                 "training_rows": _safe_int(data_quality.get("row_count"), 0),
             },
@@ -3022,7 +3283,9 @@ class PredictiveTrainerManager:
         active_negative = _safe_int(active.get("negative_rows"), 0)
         active_total = max(1, active_positive + active_negative)
         active_positive_share = active_positive / float(active_total)
-        active_corpus_instance = str(active.get("shadow_corpus_instance_id") or "").strip()
+        active_corpus_instance = str(
+            active.get("shadow_corpus_instance_id") or ""
+        ).strip()
         candidate_corpus_instance = str(
             training.get("shadow_corpus_instance_id") or ""
         ).strip()
@@ -3037,19 +3300,26 @@ class PredictiveTrainerManager:
             row_count_issues.append("training_rows_not_improved")
         if candidate_shadow_rows <= _safe_int(active.get("shadow_rows"), 0):
             row_count_issues.append("shadow_rows_not_improved")
-        if candidate_positive_share + self.config.positive_share_collapse_tolerance < active_positive_share:
+        if (
+            candidate_positive_share + self.config.positive_share_collapse_tolerance
+            < active_positive_share
+        ):
             issues.append("positive_share_collapsed")
 
         candidate_calibration = candidate_model.get("calibration", {})
         candidate_mae = _safe_float(candidate_calibration.get("global_mae_sol"))
-        promotion_baseline_calibration = candidate_model.get("promotion_baseline_calibration")
+        promotion_baseline_calibration = candidate_model.get(
+            "promotion_baseline_calibration"
+        )
         if not isinstance(promotion_baseline_calibration, dict):
             promotion_baseline_calibration = {}
         active_comparison_source = "active_stored_artifact"
         active_comparison_error = promotion_baseline_calibration.get("error")
         active_mae = None
         if not active_comparison_error:
-            active_mae = _safe_float(promotion_baseline_calibration.get("global_mae_sol"))
+            active_mae = _safe_float(
+                promotion_baseline_calibration.get("global_mae_sol")
+            )
             if active_mae is not None:
                 active_comparison_source = str(
                     promotion_baseline_calibration.get("source")
@@ -3068,14 +3338,16 @@ class PredictiveTrainerManager:
         )
 
         candidate_brier = _safe_float(
-            candidate_calibration.get("tradeability_head_brier", {}).get("p_positive_after_cost")
+            candidate_calibration.get("tradeability_head_brier", {}).get(
+                "p_positive_after_cost"
+            )
         )
         active_brier = None
         if not active_comparison_error:
             active_brier = _safe_float(
-                (promotion_baseline_calibration.get("tradeability_head_brier") or {}).get(
-                    "p_positive_after_cost"
-                )
+                (
+                    promotion_baseline_calibration.get("tradeability_head_brier") or {}
+                ).get("p_positive_after_cost")
             )
         if active_brier is None:
             active_brier = _safe_float(active.get("p_positive_after_cost_brier"))
@@ -3085,19 +3357,22 @@ class PredictiveTrainerManager:
             and candidate_brier > active_brier
         )
         candidate_brier_degraded = candidate_brier_not_additive and (
-            candidate_brier > active_brier * self.config.p_positive_brier_degradation_factor
+            candidate_brier
+            > active_brier * self.config.p_positive_brier_degradation_factor
         )
         candidate_mae_improved = (
-            candidate_mae is not None and active_mae is not None and candidate_mae < active_mae
+            candidate_mae is not None
+            and active_mae is not None
+            and candidate_mae < active_mae
         )
         candidate_brier_improved = (
             candidate_brier is not None
             and active_brier is not None
             and candidate_brier < active_brier
         )
-        quality_metric_available = (candidate_mae is not None and active_mae is not None) or (
-            candidate_brier is not None and active_brier is not None
-        )
+        quality_metric_available = (
+            candidate_mae is not None and active_mae is not None
+        ) or (candidate_brier is not None and active_brier is not None)
         if not quality_metric_available:
             issues.append("promotion_quality_metrics_missing")
         elif not (candidate_mae_improved or candidate_brier_improved):
@@ -3183,11 +3458,15 @@ class PredictiveTrainerManager:
             )
             self._active_run_id = run_id
             self._current_task = asyncio.create_task(
-                self._run_cycle(run_id=run_id, requested_by=requested_by, auto_promote=auto_promote)
+                self._run_cycle(
+                    run_id=run_id, requested_by=requested_by, auto_promote=auto_promote
+                )
             )
             return {"status": "started", "run_id": run_id}
 
-    async def _run_cycle(self, *, run_id: str, requested_by: str, auto_promote: bool | None) -> None:
+    async def _run_cycle(
+        self, *, run_id: str, requested_by: str, auto_promote: bool | None
+    ) -> None:
         archive_after_completion = False
         try:
             await self._run_sync_on_executor(
@@ -3208,7 +3487,9 @@ class PredictiveTrainerManager:
                     self._maybe_archive_shadow_corpus_sync, force=True
                 )
 
-    def _run_cycle_sync(self, *, run_id: str, requested_by: str, auto_promote: bool | None) -> None:
+    def _run_cycle_sync(
+        self, *, run_id: str, requested_by: str, auto_promote: bool | None
+    ) -> None:
         self._refresh_shadow_index_stats_cache_sync()
         run_dir = self._run_dir(run_id)
         logs_dir = run_dir / "logs"
@@ -3280,12 +3561,14 @@ class PredictiveTrainerManager:
                 "1.0",
                 "--allow-low-quality-dataset",
             )
-            dataset_returncode, dataset_stdout, dataset_stderr = self._run_logged_subprocess(
-                cmd=dataset_cmd,
-                cwd=self.config.algo_repo_dir,
-                stdout_path=dataset_stdout_path,
-                stderr_path=dataset_stderr_path,
-                timeout=self.config.train_timeout_secs,
+            dataset_returncode, dataset_stdout, dataset_stderr = (
+                self._run_logged_subprocess(
+                    cmd=dataset_cmd,
+                    cwd=self.config.algo_repo_dir,
+                    stdout_path=dataset_stdout_path,
+                    stderr_path=dataset_stderr_path,
+                    timeout=self.config.train_timeout_secs,
+                )
             )
             if dataset_returncode != 0:
                 combined = f"{dataset_stdout}\n{dataset_stderr}"
@@ -3298,7 +3581,10 @@ class PredictiveTrainerManager:
                         payload = json.loads(blob)
                     except Exception:
                         continue
-                    if str(payload.get("reason") or "").strip() == "dataset_quality_gate_failed":
+                    if (
+                        str(payload.get("reason") or "").strip()
+                        == "dataset_quality_gate_failed"
+                    ):
                         quality_gate_failed = True
                         break
                 if not (quality_gate_failed and dataset_path.exists()):
@@ -3327,9 +3613,11 @@ class PredictiveTrainerManager:
                 "--shadow-index",
                 str(self.config.shadow_sqlite_path),
                 "--shadow-max-raw-entries",
-                "0"
-                if self.config.shadow_max_raw_entries is None
-                else str(self.config.shadow_max_raw_entries),
+                (
+                    "0"
+                    if self.config.shadow_max_raw_entries is None
+                    else str(self.config.shadow_max_raw_entries)
+                ),
             )
             train_returncode, train_stdout, train_stderr = self._run_logged_subprocess(
                 cmd=train_cmd,
@@ -3382,11 +3670,13 @@ class PredictiveTrainerManager:
                 "--snapshot",
                 str(calibration_candidate),
             )
-            calibration_returncode, calibration_stdout, calibration_stderr = self._run_logged_subprocess(
-                cmd=calibration_cmd,
-                cwd=self.config.algo_repo_dir,
-                stdout_path=calibration_stdout_path,
-                stderr_path=calibration_stderr_path,
+            calibration_returncode, calibration_stdout, calibration_stderr = (
+                self._run_logged_subprocess(
+                    cmd=calibration_cmd,
+                    cwd=self.config.algo_repo_dir,
+                    stdout_path=calibration_stdout_path,
+                    stderr_path=calibration_stderr_path,
+                )
             )
             if calibration_returncode != 0:
                 raise RuntimeError(
@@ -3454,7 +3744,9 @@ class PredictiveTrainerManager:
                 "candidate_eval_pack_md": str(eval_pack_md),
             }
             manifest["candidate_model"] = {
-                "training_rows": _safe_int(candidate_attestation.get("training", {}).get("rows"), 0),
+                "training_rows": _safe_int(
+                    candidate_attestation.get("training", {}).get("rows"), 0
+                ),
                 "executed_rows": _safe_int(
                     candidate_attestation.get("training", {}).get("executed_rows"), 0
                 ),
@@ -3467,20 +3759,25 @@ class PredictiveTrainerManager:
                 "negative_rows": _safe_int(
                     candidate_attestation.get("validation", {}).get("negative_rows"), 0
                 ),
-                "trained_at": candidate_attestation.get("validation", {}).get("trained_at"),
+                "trained_at": candidate_attestation.get("validation", {}).get(
+                    "trained_at"
+                ),
                 "version": candidate_attestation.get("training", {}).get("version"),
                 "raw_shadow_entry_count": _safe_int(
-                    candidate_attestation.get("training", {}).get("raw_shadow_entry_count"), 0
+                    candidate_attestation.get("training", {}).get(
+                        "raw_shadow_entry_count"
+                    ),
+                    0,
                 ),
-                "shadow_corpus_instance_id": candidate_attestation.get("training", {}).get(
-                    "shadow_corpus_instance_id"
-                ),
-                "shadow_corpus_created_at": candidate_attestation.get("training", {}).get(
-                    "shadow_corpus_created_at"
-                ),
-                "shadow_corpus_family_id": candidate_attestation.get("training", {}).get(
-                    "shadow_corpus_family_id"
-                ),
+                "shadow_corpus_instance_id": candidate_attestation.get(
+                    "training", {}
+                ).get("shadow_corpus_instance_id"),
+                "shadow_corpus_created_at": candidate_attestation.get(
+                    "training", {}
+                ).get("shadow_corpus_created_at"),
+                "shadow_corpus_family_id": candidate_attestation.get(
+                    "training", {}
+                ).get("shadow_corpus_family_id"),
                 "shadow_corpus_entry_count": _safe_int(
                     candidate_attestation.get("training", {}).get(
                         "shadow_corpus_entry_count"
@@ -3493,7 +3790,9 @@ class PredictiveTrainerManager:
                     ),
                 ),
                 "shadow_corpus_last_seq": _safe_int(
-                    candidate_attestation.get("training", {}).get("shadow_corpus_last_seq"),
+                    candidate_attestation.get("training", {}).get(
+                        "shadow_corpus_last_seq"
+                    ),
                     0,
                 ),
                 "shadow_corpus_snapshot_sha256": candidate_attestation.get(
@@ -3503,11 +3802,11 @@ class PredictiveTrainerManager:
                     "training", {}
                 ).get("shadow_corpus_durability_state")
                 or "unprotected",
-                "calibration_rows": _safe_int(
-                    _read_json(calibration_candidate).get("rows"), 0
-                )
-                if calibration_candidate.exists()
-                else 0,
+                "calibration_rows": (
+                    _safe_int(_read_json(calibration_candidate).get("rows"), 0)
+                    if calibration_candidate.exists()
+                    else 0
+                ),
             }
             manifest["raw_shadow_entry_count"] = manifest["candidate_model"].get(
                 "raw_shadow_entry_count"
@@ -3536,9 +3835,7 @@ class PredictiveTrainerManager:
             auto_promote_enabled = bool(
                 self.config.auto_promote if auto_promote is None else auto_promote
             )
-            should_promote = bool(
-                auto_promote_enabled and gate_result.get("ok")
-            )
+            should_promote = bool(auto_promote_enabled and gate_result.get("ok"))
             if should_promote:
                 self._update_manifest_stage(
                     run_id,
@@ -3564,11 +3861,15 @@ class PredictiveTrainerManager:
                 manifest["promotion"]["blocked_reason"] = None
             else:
                 manifest["promotion"]["state"] = (
-                    "gated_off" if not gate_result.get("ok") else "auto_promote_disabled"
+                    "gated_off"
+                    if not gate_result.get("ok")
+                    else "auto_promote_disabled"
                 )
-                manifest["promotion"]["blocked_reason"] = self._promotion_blocked_reason(
-                    gate_result=gate_result,
-                    auto_promote_enabled=auto_promote_enabled,
+                manifest["promotion"]["blocked_reason"] = (
+                    self._promotion_blocked_reason(
+                        gate_result=gate_result,
+                        auto_promote_enabled=auto_promote_enabled,
+                    )
                 )
             _write_json(promotion_record, manifest["promotion"])
             self._update_manifest_stage(
@@ -3602,9 +3903,11 @@ class PredictiveTrainerManager:
                 stage="failed",
                 stage_message=f"trainer run failed: {exc}",
                 dataset_rows=manifest.get("dataset_rows"),
-                dataset_summary_path=Path(manifest["dataset_summary_path"])
-                if manifest.get("dataset_summary_path")
-                else None,
+                dataset_summary_path=(
+                    Path(manifest["dataset_summary_path"])
+                    if manifest.get("dataset_summary_path")
+                    else None
+                ),
             )
             manifest["error"] = {
                 "type": exc.__class__.__name__,
@@ -3661,8 +3964,10 @@ class PredictiveTrainerManager:
             promotion["state"] = "promoted_pending_restart"
             return promotion
 
-        if not repo_state.get("status_clean") or repo_state.get("branch") != "main" or not repo_state.get(
-            "head_matches_origin_main"
+        if (
+            not repo_state.get("status_clean")
+            or repo_state.get("branch") != "main"
+            or not repo_state.get("head_matches_origin_main")
         ):
             self._pending_restart = {
                 "run_id": run_id,
@@ -3765,7 +4070,9 @@ class PredictiveTrainerManager:
             **promotion,
         }
         self._write_manifest(run_id, manifest)
-        _write_json(self._run_artifact_paths(run_id)["promotion_record"], manifest["promotion"])
+        _write_json(
+            self._run_artifact_paths(run_id)["promotion_record"], manifest["promotion"]
+        )
         self._append_history(
             {
                 "timestamp": _utc_iso(),
@@ -3781,14 +4088,24 @@ class PredictiveTrainerManager:
         reconciliation = self._reconcile_run_state()
         active_model = self._active_artifacts()
         active_model_shadow_rows = _safe_int(active_model.get("shadow_rows"), 0)
-        active_model_raw_shadow_entry_count = _safe_int(active_model.get("raw_shadow_entry_count"), 0)
+        active_model_raw_shadow_entry_count = _safe_int(
+            active_model.get("raw_shadow_entry_count"), 0
+        )
         trigger = self._scheduler_trigger_payload()
-        current_shadow_entry_count = _safe_int(trigger.get("current_shadow_entry_count"), 0)
-        new_shadow_rows_since_trigger = _safe_int(trigger.get("new_shadow_rows_since_trigger"), 0)
+        current_shadow_entry_count = _safe_int(
+            trigger.get("current_shadow_entry_count"), 0
+        )
+        new_shadow_rows_since_trigger = _safe_int(
+            trigger.get("new_shadow_rows_since_trigger"), 0
+        )
         repo_state = self._repo_launch_ready()
         latest_manifest = self._latest_manifest_summary(status="completed") or {}
-        latest_completed_run_id = str(latest_manifest.get("run_id") or "").strip() or None
-        latest_completed_run_status = str(latest_manifest.get("status") or "").strip() or None
+        latest_completed_run_id = (
+            str(latest_manifest.get("run_id") or "").strip() or None
+        )
+        latest_completed_run_status = (
+            str(latest_manifest.get("status") or "").strip() or None
+        )
         latest_completed_run_raw_shadow_entry_count = _safe_int(
             latest_manifest.get("raw_shadow_entry_count"), 0
         )
@@ -3824,10 +4141,14 @@ class PredictiveTrainerManager:
         compatibility_state = str(
             corpus_state.get("shadow_corpus_compatibility_state") or ""
         ).strip()
-        latest_completed_run_shadow_corpus_family_id = _resolved_shadow_corpus_family_id(
-            latest_manifest.get("shadow_corpus_family_id")
-            or (latest_manifest.get("candidate_model") or {}).get("shadow_corpus_family_id"),
-            has_shadow_history=latest_completed_run_raw_shadow_entry_count > 0,
+        latest_completed_run_shadow_corpus_family_id = (
+            _resolved_shadow_corpus_family_id(
+                latest_manifest.get("shadow_corpus_family_id")
+                or (latest_manifest.get("candidate_model") or {}).get(
+                    "shadow_corpus_family_id"
+                ),
+                has_shadow_history=latest_completed_run_raw_shadow_entry_count > 0,
+            )
         )
         current_shadow_corpus_family_id = _resolved_shadow_corpus_family_id(
             trigger.get("shadow_corpus_family_id"),
@@ -3838,12 +4159,15 @@ class PredictiveTrainerManager:
             and latest_completed_run_raw_shadow_entry_count > 0
             and current_shadow_entry_count > 0
             and current_shadow_corpus_family_id
-            and current_shadow_corpus_family_id == latest_completed_run_shadow_corpus_family_id
+            and current_shadow_corpus_family_id
+            == latest_completed_run_shadow_corpus_family_id
             and _shadow_corpus_covers_current(
                 current_entry_count=current_shadow_entry_count,
                 current_last_seq=_safe_int(trigger.get("shadow_corpus_last_seq"), 0),
                 candidate_entry_count=latest_completed_run_raw_shadow_entry_count,
-                candidate_last_seq=_safe_int(latest_manifest.get("shadow_corpus_last_seq"), 0),
+                candidate_last_seq=_safe_int(
+                    latest_manifest.get("shadow_corpus_last_seq"), 0
+                ),
             )
         )
         if shadow_index_probe_state != "available":
@@ -3915,20 +4239,22 @@ class PredictiveTrainerManager:
             "active_next_state_ledger_path": str(self.config.next_state_ledger_path),
             "shadow_source": self._shadow_stats_source(),
             "shadow_stats_path": str(self._shadow_stats_path()),
-            "runtime_analytics_db_path": str(self.config.runtime_analytics_db_path)
-            if self.config.runtime_analytics_db_path is not None
-            else None,
-            "shadow_index_path": str(self.config.shadow_sqlite_path),
-            "shadow_index_legacy_path": str(self.config.shadow_index_path),
-            "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
+            "runtime_analytics_db_path": (
+                str(self.config.runtime_analytics_db_path)
+                if self.config.runtime_analytics_db_path is not None
+                else None
+            ),
+            **self._shadow_store_paths_payload(),
             "shadow_archive_root": str(self.config.shadow_archive_root),
             "train_interval_secs": self.config.train_interval_secs,
             "scheduler_poll_secs": self.config.scheduler_poll_secs,
             "train_timeout_secs": self.config.train_timeout_secs,
             "shadow_max_raw_entries": self.config.shadow_max_raw_entries,
-            "shadow_snapshot_tmpdir": str(self.config.shadow_snapshot_tmpdir)
-            if self.config.shadow_snapshot_tmpdir is not None
-            else None,
+            "shadow_snapshot_tmpdir": (
+                str(self.config.shadow_snapshot_tmpdir)
+                if self.config.shadow_snapshot_tmpdir is not None
+                else None
+            ),
             "shadow_archive_enabled": self.config.shadow_archive_enabled,
             "shadow_archive_timeout_secs": self.config.shadow_archive_timeout_secs,
             "stale_running_grace_secs": self.config.stale_running_grace_secs,
@@ -3942,8 +4268,16 @@ class PredictiveTrainerManager:
 
     def _status_payload_deep_sync(self) -> dict[str, Any]:
         self._reconcile_run_state()
-        manifest = self._read_manifest_if_exists(self._active_run_id) if self._active_run_id else None
-        active_run = self._manifest_for_status(self._active_run_id, manifest) if self._active_run_id else None
+        manifest = (
+            self._read_manifest_if_exists(self._active_run_id)
+            if self._active_run_id
+            else None
+        )
+        active_run = (
+            self._manifest_for_status(self._active_run_id, manifest)
+            if self._active_run_id
+            else None
+        )
         freshness = self._freshness_payload()
         return {
             "status": "running" if self.is_running() else "idle",
@@ -3959,12 +4293,12 @@ class PredictiveTrainerManager:
             "latest_run_context": self._latest_run_context_path(),
             "shadow_source": self._shadow_stats_source(),
             "shadow_stats_path": str(self._shadow_stats_path()),
-            "runtime_analytics_db_path": str(self.config.runtime_analytics_db_path)
-            if self.config.runtime_analytics_db_path is not None
-            else None,
-            "shadow_index_path": str(self.config.shadow_sqlite_path),
-            "shadow_index_legacy_path": str(self.config.shadow_index_path),
-            "shadow_duckdb_path": str(self.config.shadow_duckdb_path),
+            "runtime_analytics_db_path": (
+                str(self.config.runtime_analytics_db_path)
+                if self.config.runtime_analytics_db_path is not None
+                else None
+            ),
+            **self._shadow_store_paths_payload(),
             "shadow_archive_root": str(self.config.shadow_archive_root),
             "shadow_archive_enabled": self.config.shadow_archive_enabled,
             "stale_running_grace_secs": self.config.stale_running_grace_secs,

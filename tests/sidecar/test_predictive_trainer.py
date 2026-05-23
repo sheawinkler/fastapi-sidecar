@@ -61,7 +61,9 @@ def _write_shadow_sqlite_count(
     conn.close()
 
 
-def _write_runtime_shadow_rows(db_path: Path, count: int, *, start_ms: int = 1_000) -> None:
+def _write_runtime_shadow_rows(
+    db_path: Path, count: int, *, start_ms: int = 1_000
+) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.execute(
@@ -115,7 +117,11 @@ def _write_active_training_artifact(
             {
                 "training": {
                     "rows": rows if rows is not None else raw_shadow_entry_count,
-                    "shadow_rows": shadow_rows if shadow_rows is not None else raw_shadow_entry_count,
+                    "shadow_rows": (
+                        shadow_rows
+                        if shadow_rows is not None
+                        else raw_shadow_entry_count
+                    ),
                     "raw_shadow_entry_count": raw_shadow_entry_count,
                     "shadow_corpus_instance_id": corpus_instance_id,
                     "shadow_corpus_family_id": corpus_family_id,
@@ -200,7 +206,9 @@ def _make_config(tmp_path: Path) -> PredictiveTrainerConfig:
     )
 
 
-def test_from_env_accepts_numeric_truthy_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_from_env_accepts_numeric_truthy_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     algo_repo = tmp_path / "algo"
     algo_repo.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_ALGO_REPO_DIR", str(algo_repo))
@@ -269,6 +277,39 @@ def test_from_env_can_disable_shadow_archive(
     assert config.shadow_archive_enabled is False
 
 
+def test_from_env_defaults_to_runtime_analytics_without_shadow_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    algo_repo = tmp_path / "algo"
+    algo_repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_ALGO_REPO_DIR", str(algo_repo))
+    monkeypatch.delenv("PREDICTIVE_SHADOW_SOURCE", raising=False)
+    monkeypatch.delenv("SIDECAR_PREDICTIVE_SHADOW_ARCHIVE_ENABLED", raising=False)
+    monkeypatch.delenv("PREDICTIVE_SHADOW_ARCHIVE_ENABLED", raising=False)
+
+    config = PredictiveTrainerConfig.from_env(tmp_path / "data")
+
+    assert config.shadow_source == "runtime_analytics"
+    assert (
+        config.runtime_analytics_db_path
+        == predictive_trainer.DEFAULT_RUNTIME_ANALYTICS_DB
+    )
+    assert config.shadow_archive_enabled is False
+
+
+def test_from_env_allows_explicit_local_sqlite_shadow_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    algo_repo = tmp_path / "algo"
+    algo_repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_ALGO_REPO_DIR", str(algo_repo))
+    monkeypatch.setenv("PREDICTIVE_SHADOW_SOURCE", "sqlite")
+
+    config = PredictiveTrainerConfig.from_env(tmp_path / "data")
+
+    assert config.shadow_source == "local_sqlite"
+
+
 def test_from_env_allows_disabling_train_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -321,7 +362,9 @@ def test_from_env_enforces_minimum_stale_running_grace(
     assert config.stale_running_grace_secs == 300
 
 
-def test_from_env_defaults_scheduler_enabled_when_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_from_env_defaults_scheduler_enabled_when_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     algo_repo = tmp_path / "algo"
     algo_repo.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("SIDECAR_PREDICTIVE_TRAINER_ALGO_REPO_DIR", str(algo_repo))
@@ -398,9 +441,7 @@ def test_evaluate_candidate_rejects_comparable_quality_drift(tmp_path: Path):
     candidate_model = {
         "calibration": {
             "global_mae_sol": 0.0054291091481175,
-            "tradeability_head_brier": {
-                "p_positive_after_cost": 0.14712269037361925
-            },
+            "tradeability_head_brier": {"p_positive_after_cost": 0.14712269037361925},
         }
     }
     candidate_attestation = {
@@ -614,7 +655,9 @@ def test_build_attestation_carries_provenance_summary(tmp_path: Path):
                     "shadow_rows": 10,
                     "excluded_invalid_target_rows": {"executed": 0, "shadow": 0},
                 },
-                "source_provenance_class_counts_shadow": {"yellowstone_authoritative": 9},
+                "source_provenance_class_counts_shadow": {
+                    "yellowstone_authoritative": 9
+                },
                 "source_provenance_class_counts_executed": {
                     "yellowstone_authoritative": 2
                 },
@@ -668,7 +711,12 @@ def test_build_attestation_carries_provenance_summary(tmp_path: Path):
     attestation = manager._build_attestation(
         candidate_model_path=candidate_model_path,
         dataset_path=tmp_path / "dataset.jsonl",
-        dataset_summary={"ok": True, "rows": 12, "quality_gates": {}, "summary": "summary"},
+        dataset_summary={
+            "ok": True,
+            "rows": 12,
+            "quality_gates": {},
+            "summary": "summary",
+        },
         dataset_summary_path=tmp_path / "dataset_summary.json",
         candidate_output_hint=tmp_path / "candidate.json",
     )
@@ -689,14 +737,18 @@ def test_build_attestation_carries_provenance_summary(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_start_run_prevents_overlap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_start_run_prevents_overlap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 150)
     manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def _fake_run_cycle(*, run_id: str, requested_by: str, auto_promote: bool | None) -> None:
+    async def _fake_run_cycle(
+        *, run_id: str, requested_by: str, auto_promote: bool | None
+    ) -> None:
         started.set()
         await release.wait()
 
@@ -795,6 +847,10 @@ def test_runtime_analytics_source_ignores_stale_cached_sqlite_count(tmp_path: Pa
 
     assert payload["shadow_source"] == "runtime_analytics"
     assert payload["shadow_stats_path"] == str(runtime_db)
+    assert payload["shadow_index_path"] == str(runtime_db)
+    assert payload["shadow_index_legacy_path"] is None
+    assert payload["shadow_duckdb_path"] is None
+    assert payload["shadow_local_sqlite_path"] == str(config.shadow_sqlite_path)
     assert payload["current_shadow_entry_count"] == 333
     assert payload["scheduler_trigger"]["shadow_index_source"] == "runtime_analytics"
 
@@ -861,7 +917,9 @@ def test_python_cmd_forces_unbuffered_python(tmp_path: Path):
     assert cmd == ["python3", "-u", "/tmp/example.py", "--flag", "value"]
 
 
-def test_read_json_retries_resource_deadlock_then_succeeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_read_json_retries_resource_deadlock_then_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     path = tmp_path / "model.json"
     path.write_text('{"ok": true}', encoding="utf-8")
     real_read_text = Path.read_text
@@ -907,7 +965,9 @@ def test_scheduler_runtime_payload_reports_dead_scheduler_task(tmp_path: Path):
     assert payload["scheduler_task_exception_message"] == "scheduler died"
 
 
-def test_active_artifacts_degrades_when_model_read_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_active_artifacts_degrades_when_model_read_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     manager.config.model_path.write_text('{"ok": true}', encoding="utf-8")
     real_read_json = predictive_trainer._read_json
@@ -927,7 +987,9 @@ def test_active_artifacts_degrades_when_model_read_fails(tmp_path: Path, monkeyp
     assert "Resource deadlock avoided" in payload["model_read_error"]["message"]
 
 
-def test_scheduler_trigger_skips_auto_retrain_when_active_model_covers_current_same_family(tmp_path: Path):
+def test_scheduler_trigger_skips_auto_retrain_when_active_model_covers_current_same_family(
+    tmp_path: Path,
+):
     config = _make_config(tmp_path)
     manager = PredictiveTrainerManager(config)
     _write_active_training_artifact(
@@ -969,10 +1031,14 @@ def test_scheduler_trigger_skips_auto_retrain_when_active_model_covers_current_s
     assert trigger["shadow_corpus_integrity_reason"] is None
 
 
-def test_scheduler_trigger_uses_max_staleness_when_active_model_lags_current_corpus(tmp_path: Path):
+def test_scheduler_trigger_uses_max_staleness_when_active_model_lags_current_corpus(
+    tmp_path: Path,
+):
     config = _make_config(tmp_path)
     manager = PredictiveTrainerManager(config)
-    _write_active_training_artifact(config, raw_shadow_entry_count=170, shadow_rows=110, rows=115)
+    _write_active_training_artifact(
+        config, raw_shadow_entry_count=170, shadow_rows=110, rows=115
+    )
     manager._write_scheduler_state(
         {
             "last_run_id": "run-old",
@@ -1026,7 +1092,9 @@ def test_scheduler_trigger_holds_only_on_incompatible_family(tmp_path: Path):
     )
 
 
-def test_scheduler_trigger_uses_max_staleness_when_row_threshold_not_met(tmp_path: Path):
+def test_scheduler_trigger_uses_max_staleness_when_row_threshold_not_met(
+    tmp_path: Path,
+):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     manager._write_scheduler_state(
         {
@@ -1090,7 +1158,9 @@ def test_scheduler_trigger_recovers_from_terminal_manifest_stale_task(tmp_path: 
     assert trigger["stale_reason"] == "terminal_manifest_without_lock"
 
 
-def test_reconcile_clears_terminal_manifest_stale_lock_without_live_task(tmp_path: Path):
+def test_reconcile_clears_terminal_manifest_stale_lock_without_live_task(
+    tmp_path: Path,
+):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     run_id = "run-terminal-stale-lock"
     manager._active_run_id = run_id
@@ -1190,7 +1260,9 @@ def test_reconcile_preserves_running_manifest_with_live_external_trainer(
         json.dumps({"run_id": run_id, "started_at": "2026-04-07T00:00:00Z"}),
         encoding="utf-8",
     )
-    monkeypatch.setattr(manager, "_trainer_process_alive_for_run", lambda candidate: candidate == run_id)
+    monkeypatch.setattr(
+        manager, "_trainer_process_alive_for_run", lambda candidate: candidate == run_id
+    )
 
     reconciliation = manager._reconcile_run_state()
     manifest = manager._read_manifest(run_id)
@@ -1247,9 +1319,10 @@ def test_reconcile_holds_recent_artifact_progress_instead_of_failing(
         == "running_manifest_has_recent_artifact_progress"
     )
     assert reconciliation["stale_running_recovery_hold"]["run_id"] == run_id
-    assert reconciliation["stale_running_recovery_hold"][
-        "latest_activity_source"
-    ] == "artifact:model_candidate"
+    assert (
+        reconciliation["stale_running_recovery_hold"]["latest_activity_source"]
+        == "artifact:model_candidate"
+    )
     assert manager._active_run_id == run_id
     assert manager.is_running() is True
     assert manifest["status"] == "running"
@@ -1311,7 +1384,9 @@ def test_reconcile_marks_artifact_progress_stale_after_grace(
     assert not manager.config.lock_path.exists()
 
 
-def test_scheduler_trigger_retries_failed_run_for_lagging_current_corpus(tmp_path: Path):
+def test_scheduler_trigger_retries_failed_run_for_lagging_current_corpus(
+    tmp_path: Path,
+):
     config = _make_config(tmp_path)
     manager = PredictiveTrainerManager(config)
     run_id = "run-failed"
@@ -1367,7 +1442,9 @@ def test_health_payload_reports_model_freshness_state(tmp_path: Path):
         encoding="utf-8",
     )
     manager.config.model_path.write_text("{}", encoding="utf-8")
-    manager.config.calibration_path.write_text(json.dumps({"rows": 10}), encoding="utf-8")
+    manager.config.calibration_path.write_text(
+        json.dumps({"rows": 10}), encoding="utf-8"
+    )
     _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 260)
     manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
     manager._write_scheduler_state(
@@ -1405,7 +1482,9 @@ def test_health_payload_reports_current_when_latest_run_gated_no_change(tmp_path
         encoding="utf-8",
     )
     manager.config.model_path.write_text("{}", encoding="utf-8")
-    manager.config.calibration_path.write_text(json.dumps({"rows": 10}), encoding="utf-8")
+    manager.config.calibration_path.write_text(
+        json.dumps({"rows": 10}), encoding="utf-8"
+    )
     _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 260)
     manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
     manager._write_scheduler_state(
@@ -1427,7 +1506,10 @@ def test_health_payload_reports_current_when_latest_run_gated_no_change(tmp_path
                 "state": "gated_off",
                 "gate_result": {
                     "ok": False,
-                    "issues": ["training_rows_not_improved", "shadow_rows_not_improved"],
+                    "issues": [
+                        "training_rows_not_improved",
+                        "shadow_rows_not_improved",
+                    ],
                 },
             },
         },
@@ -1483,11 +1565,18 @@ def test_health_payload_reports_current_for_same_family_active_superset(tmp_path
     assert payload["model_freshness_state"] == "current"
 
 
-def test_health_payload_uses_cached_sqlite_stats_not_json_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_health_payload_uses_cached_sqlite_stats_not_json_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 333)
     manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
-    monkeypatch.setattr("src.api.predictive_trainer._count_json_array_entries", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("json hot path used")))
+    monkeypatch.setattr(
+        "src.api.predictive_trainer._count_json_array_entries",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("json hot path used")
+        ),
+    )
 
     payload = manager.health_payload()
 
@@ -1496,7 +1585,9 @@ def test_health_payload_uses_cached_sqlite_stats_not_json_count(tmp_path: Path, 
     assert payload["scheduler_trigger"]["shadow_index_count_error"] is None
 
 
-def test_health_payload_refreshes_stale_cached_sqlite_missing_when_file_exists(tmp_path: Path):
+def test_health_payload_refreshes_stale_cached_sqlite_missing_when_file_exists(
+    tmp_path: Path,
+):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     manager._write_scheduler_state(
         {
@@ -1520,10 +1611,14 @@ def test_health_payload_refreshes_stale_cached_sqlite_missing_when_file_exists(t
     assert payload["scheduler_trigger"]["shadow_index_count_error"] is None
 
 
-def test_scheduler_trigger_reports_shadow_index_unavailable_without_fake_modeled_state(tmp_path: Path):
+def test_scheduler_trigger_reports_shadow_index_unavailable_without_fake_modeled_state(
+    tmp_path: Path,
+):
     config = _make_config(tmp_path)
     manager = PredictiveTrainerManager(config)
-    _write_active_training_artifact(config, raw_shadow_entry_count=200, shadow_rows=120, rows=125)
+    _write_active_training_artifact(
+        config, raw_shadow_entry_count=200, shadow_rows=120, rows=125
+    )
     manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
 
     trigger = manager._scheduler_trigger_payload()
@@ -1549,7 +1644,11 @@ def test_status_payload_reports_shadow_store_paths(tmp_path: Path):
     assert payload["shadow_index_path"] == str(manager.config.shadow_sqlite_path)
     assert payload["shadow_index_legacy_path"] == str(manager.config.shadow_index_path)
     assert payload["shadow_duckdb_path"] == str(manager.config.shadow_duckdb_path)
-    assert payload["shadow_index_probe_state"] in {"available", "unavailable", "stale_cached"}
+    assert payload["shadow_index_probe_state"] in {
+        "available",
+        "unavailable",
+        "stale_cached",
+    }
 
 
 def test_status_payload_reports_active_run_stage_and_artifact_flags(tmp_path: Path):
@@ -1585,7 +1684,9 @@ def test_status_payload_reports_active_run_stage_and_artifact_flags(tmp_path: Pa
     assert payload["active_run"]["model_candidate_exists"] is True
     assert payload["active_run"]["training_candidate_exists"] is False
     assert payload["active_run"]["eval_pack_exists"] is False
-    assert payload["active_run"]["log_paths"]["train_stdout"].endswith("train.stdout.log")
+    assert payload["active_run"]["log_paths"]["train_stdout"].endswith(
+        "train.stdout.log"
+    )
 
 
 def test_status_payload_overlays_active_run_on_cached_idle_snapshot(tmp_path: Path):
@@ -1710,7 +1811,9 @@ def test_run_logged_subprocess_streams_output_before_completion(tmp_path: Path):
 
     deadline = time.time() + 2.0
     while time.time() < deadline:
-        if stdout_path.exists() and "stdout-start" in stdout_path.read_text(encoding="utf-8"):
+        if stdout_path.exists() and "stdout-start" in stdout_path.read_text(
+            encoding="utf-8"
+        ):
             break
         time.sleep(0.05)
     else:
@@ -1750,7 +1853,9 @@ def test_run_logged_subprocess_exports_trainer_data_dir(tmp_path: Path):
     assert returncode == 0
     assert stderr_text == ""
     assert stdout_text.strip() == str(manager.config.data_dir)
-    assert stdout_path.read_text(encoding="utf-8").strip() == str(manager.config.data_dir)
+    assert stdout_path.read_text(encoding="utf-8").strip() == str(
+        manager.config.data_dir
+    )
 
 
 def test_terminate_active_subprocess_stops_logged_subprocess(tmp_path: Path):
@@ -1804,7 +1909,9 @@ def test_archive_shadow_corpus_sync_returns_timeout_result(
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     manager.config = replace(manager.config, shadow_archive_timeout_secs=41)
     manager.config.archive_shadow_script_path.parent.mkdir(parents=True, exist_ok=True)
-    manager.config.archive_shadow_script_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    manager.config.archive_shadow_script_path.write_text(
+        "#!/usr/bin/env python3\n", encoding="utf-8"
+    )
 
     def _fake_run(*args, **kwargs):
         assert kwargs["timeout"] == 41
@@ -1835,6 +1942,27 @@ def test_archive_shadow_corpus_sync_skips_when_disabled(tmp_path: Path):
     assert result == {"ok": False, "reason": "archive_disabled"}
 
 
+def test_archive_shadow_corpus_sync_skips_runtime_analytics_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager.config = replace(
+        manager.config,
+        shadow_source="runtime_analytics",
+        runtime_analytics_db_path=tmp_path / "runtime_analytics.sqlite",
+        shadow_archive_enabled=True,
+    )
+
+    def _unexpected_run(*args, **kwargs):
+        raise AssertionError("archive subprocess should not run for runtime_analytics")
+
+    monkeypatch.setattr(predictive_trainer.subprocess, "run", _unexpected_run)
+
+    result = manager._archive_shadow_corpus_sync()
+
+    assert result == {"ok": False, "reason": "archive_disabled_for_runtime_analytics"}
+
+
 def test_maybe_archive_shadow_corpus_sync_skips_when_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1844,6 +1972,28 @@ def test_maybe_archive_shadow_corpus_sync_skips_when_disabled(
 
     def _unexpected_archive() -> dict[str, object]:
         raise AssertionError("archive should not run when disabled")
+
+    monkeypatch.setattr(manager, "_archive_shadow_corpus_sync", _unexpected_archive)
+
+    result = manager._maybe_archive_shadow_corpus_sync(force=True)
+
+    assert result is None
+    assert manager._shadow_archive_last_attempt_monotonic is None
+
+
+def test_maybe_archive_shadow_corpus_sync_skips_runtime_analytics_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager.config = replace(
+        manager.config,
+        shadow_source="runtime_analytics",
+        runtime_analytics_db_path=tmp_path / "runtime_analytics.sqlite",
+        shadow_archive_enabled=True,
+    )
+
+    def _unexpected_archive() -> dict[str, object]:
+        raise AssertionError("archive should not run for runtime_analytics")
 
     monkeypatch.setattr(manager, "_archive_shadow_corpus_sync", _unexpected_archive)
 
@@ -1888,7 +2038,12 @@ def test_run_cycle_sync_records_stage_progress_and_promotion_record(
     manager.config.training_path.write_text(
         json.dumps(
             {
-                "training": {"rows": 10, "shadow_rows": 10, "executed_rows": 1, "version": "old"},
+                "training": {
+                    "rows": 10,
+                    "shadow_rows": 10,
+                    "executed_rows": 1,
+                    "version": "old",
+                },
                 "validation": {
                     "positive_rows": 6,
                     "negative_rows": 4,
@@ -1906,12 +2061,18 @@ def test_run_cycle_sync_records_stage_progress_and_promotion_record(
                     "global_mae_sol": 1.0,
                     "tradeability_head_brier": {"p_positive_after_cost": 0.5},
                 },
-                "data_quality": {"row_count": 10, "positive_net_sol_count": 6, "negative_net_sol_count": 4},
+                "data_quality": {
+                    "row_count": 10,
+                    "positive_net_sol_count": 6,
+                    "negative_net_sol_count": 4,
+                },
             }
         ),
         encoding="utf-8",
     )
-    manager.config.calibration_path.write_text(json.dumps({"rows": 1}), encoding="utf-8")
+    manager.config.calibration_path.write_text(
+        json.dumps({"rows": 1}), encoding="utf-8"
+    )
     _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 220)
     manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
 
@@ -1935,7 +2096,9 @@ def test_run_cycle_sync_records_stage_progress_and_promotion_record(
         if script_name == "build_mc_dataset.py":
             dataset_dir = stdout_path.parent.parent / "dataset"
             dataset_dir.mkdir(parents=True, exist_ok=True)
-            (dataset_dir / "dataset_latest.jsonl").write_text('{"row":1}\n', encoding="utf-8")
+            (dataset_dir / "dataset_latest.jsonl").write_text(
+                '{"row":1}\n', encoding="utf-8"
+            )
             (dataset_dir / "dataset_latest_summary.json").write_text(
                 json.dumps(
                     {
@@ -1957,7 +2120,11 @@ def test_run_cycle_sync_records_stage_progress_and_promotion_record(
                     {
                         "version": "predictive-entry-v12.2",
                         "trained_at": "2026-04-07T00:10:00Z",
-                        "training_window": {"rows": 20, "executed_rows": 5, "shadow_rows": 15},
+                        "training_window": {
+                            "rows": 20,
+                            "executed_rows": 5,
+                            "shadow_rows": 15,
+                        },
                         "data_quality": {
                             "row_count": 20,
                             "positive_net_sol_count": 12,
@@ -1974,9 +2141,16 @@ def test_run_cycle_sync_records_stage_progress_and_promotion_record(
                 encoding="utf-8",
             )
             return 0, '{"rows": 20}', ""
-        if script_name in {"update_predictive_next_state_ledger.py", "refresh_predictive_calibration.py"}:
-            Path(cmd[cmd.index("--snapshot") + 1]).write_text(json.dumps({"rows": 6}), encoding="utf-8")
-            Path(cmd[cmd.index("--ledger") + 1]).write_text('{"row":1}\n', encoding="utf-8")
+        if script_name in {
+            "update_predictive_next_state_ledger.py",
+            "refresh_predictive_calibration.py",
+        }:
+            Path(cmd[cmd.index("--snapshot") + 1]).write_text(
+                json.dumps({"rows": 6}), encoding="utf-8"
+            )
+            Path(cmd[cmd.index("--ledger") + 1]).write_text(
+                '{"row":1}\n', encoding="utf-8"
+            )
             return 0, '{"ok": true}', ""
         if script_name == "report_model_eval_pack.py":
             Path(cmd[cmd.index("--out-json") + 1]).write_text(
@@ -2000,7 +2174,9 @@ def test_run_cycle_sync_records_stage_progress_and_promotion_record(
         lambda **_kwargs: {"state": "promoted_pending_restart", "forced": False},
     )
 
-    manager._run_cycle_sync(run_id="run-progress", requested_by="manual", auto_promote=None)
+    manager._run_cycle_sync(
+        run_id="run-progress", requested_by="manual", auto_promote=None
+    )
 
     manifest = manager._read_manifest("run-progress")
     ordered_stages: list[str] = []
@@ -2037,7 +2213,12 @@ def test_run_cycle_sync_marks_failed_stage_on_train_error(
     manager.config.training_path.write_text(
         json.dumps(
             {
-                "training": {"rows": 10, "shadow_rows": 10, "executed_rows": 1, "version": "old"},
+                "training": {
+                    "rows": 10,
+                    "shadow_rows": 10,
+                    "executed_rows": 1,
+                    "version": "old",
+                },
                 "validation": {
                     "positive_rows": 6,
                     "negative_rows": 4,
@@ -2048,7 +2229,9 @@ def test_run_cycle_sync_marks_failed_stage_on_train_error(
         encoding="utf-8",
     )
     manager.config.model_path.write_text("{}", encoding="utf-8")
-    manager.config.calibration_path.write_text(json.dumps({"rows": 1}), encoding="utf-8")
+    manager.config.calibration_path.write_text(
+        json.dumps({"rows": 1}), encoding="utf-8"
+    )
     _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 220)
     manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
 
@@ -2061,7 +2244,9 @@ def test_run_cycle_sync_marks_failed_stage_on_train_error(
         if script_name == "build_mc_dataset.py":
             dataset_dir = stdout_path.parent.parent / "dataset"
             dataset_dir.mkdir(parents=True, exist_ok=True)
-            (dataset_dir / "dataset_latest.jsonl").write_text('{"row":1}\n', encoding="utf-8")
+            (dataset_dir / "dataset_latest.jsonl").write_text(
+                '{"row":1}\n', encoding="utf-8"
+            )
             (dataset_dir / "dataset_latest_summary.json").write_text(
                 json.dumps(
                     {
@@ -2086,7 +2271,9 @@ def test_run_cycle_sync_marks_failed_stage_on_train_error(
 
     monkeypatch.setattr(manager, "_run_logged_subprocess", _fake_logged_subprocess)
 
-    manager._run_cycle_sync(run_id="run-failed", requested_by="manual", auto_promote=None)
+    manager._run_cycle_sync(
+        run_id="run-failed", requested_by="manual", auto_promote=None
+    )
 
     manifest = manager._read_manifest("run-failed")
     assert manifest["status"] == "failed"
@@ -2098,7 +2285,9 @@ def test_run_cycle_sync_marks_failed_stage_on_train_error(
 
 
 @pytest.mark.asyncio
-async def test_run_cycle_offloads_sync_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_run_cycle_offloads_sync_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     calls: list[dict[str, object]] = []
 
@@ -2113,7 +2302,9 @@ async def test_run_cycle_offloads_sync_work(tmp_path: Path, monkeypatch: pytest.
 
     monkeypatch.setattr(manager, "_run_sync_on_executor", _fake_run_sync_on_executor)
 
-    await manager._run_cycle(run_id="run-offload", requested_by="manual", auto_promote=None)
+    await manager._run_cycle(
+        run_id="run-offload", requested_by="manual", auto_promote=None
+    )
 
     assert [call["func_name"] for call in calls] == [
         "_run_cycle_sync",
@@ -2150,7 +2341,9 @@ async def test_shutdown_marks_running_manifest_cancelled(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_promote_run_updates_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_promote_run_updates_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 1)
     run_id = "run-123"
@@ -2186,7 +2379,9 @@ async def test_promote_run_updates_manifest(tmp_path: Path, monkeypatch: pytest.
 
     result = await manager.promote_run(run_id, forced=True)
     updated = manager._read_manifest(run_id)
-    promotion_record = json.loads((run_dir / "promotion.json").read_text(encoding="utf-8"))
+    promotion_record = json.loads(
+        (run_dir / "promotion.json").read_text(encoding="utf-8")
+    )
 
     assert result["state"] == "promoted_pending_restart"
     assert updated["promotion"]["state"] == "promoted_pending_restart"
@@ -2195,7 +2390,9 @@ async def test_promote_run_updates_manifest(tmp_path: Path, monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
-async def test_promote_run_uses_executor_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_promote_run_uses_executor_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 1)
     run_id = "run-executor"
@@ -2237,7 +2434,9 @@ async def test_promote_run_uses_executor_helper(tmp_path: Path, monkeypatch: pyt
     assert result["state"] == "promoted_pending_restart"
 
 
-def test_promote_candidate_copies_next_state_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_promote_candidate_copies_next_state_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     run_id = "run-ledger"
     run_dir = manager._run_dir(run_id)
@@ -2259,7 +2458,11 @@ def test_promote_candidate_copies_next_state_ledger(tmp_path: Path, monkeypatch:
     monkeypatch.setattr(
         manager,
         "_repo_launch_ready",
-        lambda: {"status_clean": True, "branch": "main", "head_matches_origin_main": True},
+        lambda: {
+            "status_clean": True,
+            "branch": "main",
+            "head_matches_origin_main": True,
+        },
     )
 
     result = manager._promote_candidate(
@@ -2272,7 +2475,10 @@ def test_promote_candidate_copies_next_state_ledger(tmp_path: Path, monkeypatch:
     )
 
     assert result["state"] == "promoted_pending_restart"
-    assert manager.config.next_state_ledger_path.read_text(encoding="utf-8") == '{"row":1}\n'
+    assert (
+        manager.config.next_state_ledger_path.read_text(encoding="utf-8")
+        == '{"row":1}\n'
+    )
 
 
 def test_health_payload_clears_stale_repo_not_launch_ready_pending_restart(
@@ -2312,7 +2518,9 @@ def test_health_payload_clears_stale_repo_not_launch_ready_pending_restart(
         ),
         encoding="utf-8",
     )
-    manager.config.calibration_path.write_text(json.dumps({"rows": 8}), encoding="utf-8")
+    manager.config.calibration_path.write_text(
+        json.dumps({"rows": 8}), encoding="utf-8"
+    )
     _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 220)
     manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
     manager._write_manifest(
@@ -2345,7 +2553,10 @@ def test_health_payload_clears_stale_repo_not_launch_ready_pending_restart(
             "tracked_status_clean": True,
             "head_matches_origin_main": True,
             "untracked_count": 9,
-            "untracked_examples": ["docs/DEVELOPMENT 2.md", "scripts/build_mc_dataset 2.py"],
+            "untracked_examples": [
+                "docs/DEVELOPMENT 2.md",
+                "scripts/build_mc_dataset 2.py",
+            ],
         },
     )
     monkeypatch.setattr(
@@ -2436,7 +2647,9 @@ def test_repo_launch_ready_blocks_when_origin_fetch_fails(
 
 def test_history_payload_reads_jsonl(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
-    manager._append_history({"timestamp": "2026-04-05T00:00:00Z", "event": "trainer_run_completed"})
+    manager._append_history(
+        {"timestamp": "2026-04-05T00:00:00Z", "event": "trainer_run_completed"}
+    )
 
     payload = manager.history_payload(limit=10)
 
@@ -2444,7 +2657,9 @@ def test_history_payload_reads_jsonl(tmp_path: Path):
     assert payload["history"][-1]["event"] == "trainer_run_completed"
 
 
-def test_promote_candidate_relaunch_uses_wrapper_replace_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_promote_candidate_relaunch_uses_wrapper_replace_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     run_id = "run-relaunch"
     run_dir = manager._run_dir(run_id)
@@ -2464,7 +2679,11 @@ def test_promote_candidate_relaunch_uses_wrapper_replace_env(tmp_path: Path, mon
     monkeypatch.setattr(
         manager,
         "_repo_launch_ready",
-        lambda: {"status_clean": True, "branch": "main", "head_matches_origin_main": True},
+        lambda: {
+            "status_clean": True,
+            "branch": "main",
+            "head_matches_origin_main": True,
+        },
     )
     monkeypatch.setattr(manager, "_active_deploy_wrapper_pid", lambda: None)
     monkeypatch.setattr(manager, "_active_live_trader_pid", lambda: None)
@@ -2526,13 +2745,19 @@ def test_promote_candidate_defers_when_wrapper_active(
     monkeypatch.setattr(
         manager,
         "_repo_launch_ready",
-        lambda: {"status_clean": True, "branch": "main", "head_matches_origin_main": True},
+        lambda: {
+            "status_clean": True,
+            "branch": "main",
+            "head_matches_origin_main": True,
+        },
     )
     monkeypatch.setattr(manager, "_active_deploy_wrapper_pid", lambda: 7777)
     monkeypatch.setattr(manager, "_active_live_trader_pid", lambda: None)
     monkeypatch.setattr(
         "src.api.predictive_trainer.subprocess.Popen",
-        lambda *_args, **_kwargs: pytest.fail("restart wrapper should not spawn when wrapper is active"),
+        lambda *_args, **_kwargs: pytest.fail(
+            "restart wrapper should not spawn when wrapper is active"
+        ),
     )
 
     result = manager._promote_candidate(
@@ -2574,13 +2799,19 @@ def test_promote_candidate_skips_restart_when_live_process_running(
     monkeypatch.setattr(
         manager,
         "_repo_launch_ready",
-        lambda: {"status_clean": True, "branch": "main", "head_matches_origin_main": True},
+        lambda: {
+            "status_clean": True,
+            "branch": "main",
+            "head_matches_origin_main": True,
+        },
     )
     monkeypatch.setattr(manager, "_active_deploy_wrapper_pid", lambda: None)
     monkeypatch.setattr(manager, "_active_live_trader_pid", lambda: 8888)
     monkeypatch.setattr(
         "src.api.predictive_trainer.subprocess.Popen",
-        lambda *_args, **_kwargs: pytest.fail("restart wrapper should not spawn when live trader is active"),
+        lambda *_args, **_kwargs: pytest.fail(
+            "restart wrapper should not spawn when live trader is active"
+        ),
     )
 
     result = manager._promote_candidate(
@@ -2614,7 +2845,11 @@ def test_effective_restart_state_keeps_wrapper_active_pending(
     monkeypatch.setattr(
         manager,
         "_repo_launch_ready",
-        lambda: {"status_clean": True, "branch": "main", "head_matches_origin_main": True},
+        lambda: {
+            "status_clean": True,
+            "branch": "main",
+            "head_matches_origin_main": True,
+        },
     )
     monkeypatch.setattr(
         manager,
@@ -2627,7 +2862,11 @@ def test_effective_restart_state_keeps_wrapper_active_pending(
         latest_completed_promotion_state="promoted_pending_restart",
         latest_completed_run_raw_shadow_entry_count=0,
         active_model_raw_shadow_entry_count=0,
-        repo_state={"status_clean": True, "branch": "main", "head_matches_origin_main": True},
+        repo_state={
+            "status_clean": True,
+            "branch": "main",
+            "head_matches_origin_main": True,
+        },
     )
 
     assert pending_restart == {
@@ -2656,16 +2895,26 @@ def test_effective_restart_state_clears_wrapper_pending_when_model_serving(
     monkeypatch.setattr(
         manager,
         "_repo_launch_ready",
-        lambda: {"status_clean": True, "branch": "main", "head_matches_origin_main": True},
+        lambda: {
+            "status_clean": True,
+            "branch": "main",
+            "head_matches_origin_main": True,
+        },
     )
-    monkeypatch.setattr(manager, "_pid_matches_command_tokens", lambda _pid, _tokens: False)
+    monkeypatch.setattr(
+        manager, "_pid_matches_command_tokens", lambda _pid, _tokens: False
+    )
 
     pending_restart, effective_state = manager._effective_restart_state(
         latest_completed_run_id="run-wrapper-done",
         latest_completed_promotion_state="promoted_pending_restart",
         latest_completed_run_raw_shadow_entry_count=0,
         active_model_raw_shadow_entry_count=0,
-        repo_state={"status_clean": True, "branch": "main", "head_matches_origin_main": True},
+        repo_state={
+            "status_clean": True,
+            "branch": "main",
+            "head_matches_origin_main": True,
+        },
     )
 
     assert pending_restart is None
