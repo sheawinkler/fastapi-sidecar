@@ -37,6 +37,14 @@ RUNTIME_ANALYTICS_PREDICTIVE_FIREHOSE_FILE_PREFIX = (
 RUNTIME_ANALYTICS_FILE_NAME_TIMESTAMP_INDEX = "telemetry_queue_file_name_timestamp_idx"
 
 
+class PromotionGateBlockedError(RuntimeError):
+    """Raised when a manual promotion tries to bypass a failed promotion gate."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(f"promotion_gate_blocked:{reason}")
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -3419,7 +3427,7 @@ class PredictiveTrainerManager:
     ) -> str | None:
         if not auto_promote_enabled:
             return "auto_promote_disabled"
-        if gate_result.get("ok"):
+        if gate_result.get("ok") is True:
             return None
         primary_issue = str(gate_result.get("primary_issue") or "").strip()
         if primary_issue:
@@ -3428,6 +3436,16 @@ class PredictiveTrainerManager:
         if isinstance(issues, list) and issues:
             return f"gate:{str(issues[0]).strip()}"
         return "gate:unknown"
+
+    def _promotion_gate_blocked_reason(
+        self, gate_result: Any, *, missing_blocks: bool
+    ) -> str | None:
+        if not isinstance(gate_result, dict):
+            return "promotion_gate_missing" if missing_blocks else None
+        return self._promotion_blocked_reason(
+            gate_result=gate_result,
+            auto_promote_enabled=True,
+        )
 
     async def start_run(
         self,
@@ -3835,7 +3853,9 @@ class PredictiveTrainerManager:
             auto_promote_enabled = bool(
                 self.config.auto_promote if auto_promote is None else auto_promote
             )
-            should_promote = bool(auto_promote_enabled and gate_result.get("ok"))
+            should_promote = bool(
+                auto_promote_enabled and gate_result.get("ok") is True
+            )
             if should_promote:
                 self._update_manifest_stage(
                     run_id,
@@ -3862,7 +3882,7 @@ class PredictiveTrainerManager:
             else:
                 manifest["promotion"]["state"] = (
                     "gated_off"
-                    if not gate_result.get("ok")
+                    if gate_result.get("ok") is not True
                     else "auto_promote_disabled"
                 )
                 manifest["promotion"]["blocked_reason"] = (
@@ -4044,6 +4064,22 @@ class PredictiveTrainerManager:
                 f"shadow_corpus_integrity_hold:{corpus_state.get('shadow_corpus_integrity_reason')}"
             )
         manifest = self._read_manifest(run_id)
+        promotion_record = manifest.get("promotion") or {}
+        gate_blocked_reason = self._promotion_gate_blocked_reason(
+            promotion_record.get("gate_result"),
+            missing_blocks=True,
+        )
+        if gate_blocked_reason:
+            self._append_history(
+                {
+                    "timestamp": _utc_iso(),
+                    "event": "trainer_run_promotion_blocked",
+                    "run_id": run_id,
+                    "reason": gate_blocked_reason,
+                    "forced": forced,
+                }
+            )
+            raise PromotionGateBlockedError(gate_blocked_reason)
         artifacts = manifest.get("artifacts") or {}
         model_candidate = Path(str(artifacts.get("candidate_model") or ""))
         training_candidate = Path(str(artifacts.get("candidate_training") or ""))
@@ -4113,6 +4149,16 @@ class PredictiveTrainerManager:
         latest_completed_promotion_state = (
             str(latest_completed_promotion.get("state") or "").strip() or None
         )
+        latest_completed_promotion_gate_blocked_reason = (
+            self._promotion_gate_blocked_reason(
+                latest_completed_promotion.get("gate_result"),
+                missing_blocks=False,
+            )
+        )
+        if latest_completed_promotion_gate_blocked_reason and str(
+            latest_completed_promotion_state or ""
+        ).startswith("promoted"):
+            latest_completed_promotion_state = "gated_off"
         corpus_state = self._shadow_corpus_consistency_payload(
             shadow_stats=trigger,
             active_model=active_model,
@@ -4203,8 +4249,13 @@ class PredictiveTrainerManager:
             "shadow_row_lag_vs_active_model": shadow_row_lag,
             "latest_completed_run_id": latest_completed_run_id,
             "latest_completed_run_status": latest_completed_run_status,
-            "latest_completed_run_raw_shadow_entry_count": latest_completed_run_raw_shadow_entry_count,
+            "latest_completed_run_raw_shadow_entry_count": (
+                latest_completed_run_raw_shadow_entry_count
+            ),
             "latest_completed_promotion_state": latest_completed_promotion_state,
+            "latest_completed_promotion_gate_blocked_reason": (
+                latest_completed_promotion_gate_blocked_reason
+            ),
             "effective_promotion_state": effective_promotion_state,
             "model_freshness_state": model_freshness_state,
             "pending_restart": pending_restart,

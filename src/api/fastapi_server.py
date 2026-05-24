@@ -32,7 +32,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.cors import CORSMiddleware
 
 from .inference_backends import InferenceBackendRuntime
-from .predictive_trainer import PredictiveTrainerConfig, PredictiveTrainerManager
+from .predictive_trainer import (
+    PredictiveTrainerConfig,
+    PredictiveTrainerManager,
+    PromotionGateBlockedError,
+)
 from ..training.calibrator import CalibratorBundle, load_latest_calibrator
 
 torch = None  # type: ignore[assignment]
@@ -1772,6 +1776,8 @@ async def trainer_promote(run_id: str) -> Dict[str, Any]:
         return await _trainer_manager.promote_run(run_id, forced=True)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PromotionGateBlockedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/trainer/active-model")
