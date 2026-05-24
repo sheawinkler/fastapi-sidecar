@@ -82,6 +82,12 @@ def _safe_float(value: Any, default: float | None = None) -> float | None:
         return default
 
 
+def _promotion_additive_tolerance(
+    active_value: float, *, absolute_floor: float, relative_fraction: float
+) -> float:
+    return max(float(absolute_floor), abs(float(active_value)) * float(relative_fraction))
+
+
 def _parse_shadow_max_raw_entries(value: Any) -> int | None:
     text = str(value or "").strip()
     if not text:
@@ -538,6 +544,9 @@ class PredictiveTrainerConfig:
     stale_running_grace_secs: int = 3600
     shadow_source: str = "local_sqlite"
     runtime_analytics_db_path: Path | None = None
+    promotion_metric_additive_tolerance_fraction: float = 0.01
+    promotion_mae_additive_tolerance_sol: float = 0.00002
+    promotion_brier_additive_tolerance: float = 0.0015
 
     @property
     def runs_dir(self) -> Path:
@@ -772,6 +781,39 @@ class PredictiveTrainerConfig:
                     1.25,
                 )
                 or 1.25,
+            ),
+            promotion_metric_additive_tolerance_fraction=max(
+                0.0,
+                min(
+                    0.10,
+                    _safe_float(
+                        os.getenv(
+                            "SIDECAR_PREDICTIVE_TRAINER_PROMOTION_METRIC_ADDITIVE_TOLERANCE_FRACTION"
+                        ),
+                        0.01,
+                    )
+                    or 0.01,
+                ),
+            ),
+            promotion_mae_additive_tolerance_sol=max(
+                0.0,
+                _safe_float(
+                    os.getenv(
+                        "SIDECAR_PREDICTIVE_TRAINER_PROMOTION_MAE_ADDITIVE_TOLERANCE_SOL"
+                    ),
+                    0.00002,
+                )
+                or 0.00002,
+            ),
+            promotion_brier_additive_tolerance=max(
+                0.0,
+                _safe_float(
+                    os.getenv(
+                        "SIDECAR_PREDICTIVE_TRAINER_PROMOTION_BRIER_ADDITIVE_TOLERANCE"
+                    ),
+                    0.0015,
+                )
+                or 0.0015,
             ),
             shadow_max_raw_entries=_env_shadow_max_raw_entries(),
             shadow_snapshot_tmpdir=_env_optional_path(
@@ -3341,10 +3383,20 @@ class PredictiveTrainerManager:
         if active_mae is None:
             active_mae = _safe_float(active.get("calibration_global_mae_sol"))
             active_comparison_source = "active_stored_artifact"
+        mae_additive_tolerance = (
+            _promotion_additive_tolerance(
+                active_mae,
+                absolute_floor=self.config.promotion_mae_additive_tolerance_sol,
+                relative_fraction=self.config.promotion_metric_additive_tolerance_fraction,
+            )
+            if active_mae is not None
+            else None
+        )
         candidate_mae_not_additive = (
             candidate_mae is not None
             and active_mae is not None
-            and candidate_mae > active_mae
+            and mae_additive_tolerance is not None
+            and candidate_mae > active_mae + mae_additive_tolerance
         )
         candidate_mae_degraded = candidate_mae_not_additive and (
             candidate_mae > active_mae * self.config.calibration_mae_degradation_factor
@@ -3364,10 +3416,20 @@ class PredictiveTrainerManager:
             )
         if active_brier is None:
             active_brier = _safe_float(active.get("p_positive_after_cost_brier"))
+        brier_additive_tolerance = (
+            _promotion_additive_tolerance(
+                active_brier,
+                absolute_floor=self.config.promotion_brier_additive_tolerance,
+                relative_fraction=self.config.promotion_metric_additive_tolerance_fraction,
+            )
+            if active_brier is not None
+            else None
+        )
         candidate_brier_not_additive = (
             candidate_brier is not None
             and active_brier is not None
-            and candidate_brier > active_brier
+            and brier_additive_tolerance is not None
+            and candidate_brier > active_brier + brier_additive_tolerance
         )
         candidate_brier_degraded = candidate_brier_not_additive and (
             candidate_brier
@@ -3386,9 +3448,14 @@ class PredictiveTrainerManager:
         quality_metric_available = (
             candidate_mae is not None and active_mae is not None
         ) or (candidate_brier is not None and active_brier is not None)
+        candidate_quality_additive = (
+            not candidate_mae_not_additive and not candidate_brier_not_additive
+        )
         if not quality_metric_available:
             issues.append("promotion_quality_metrics_missing")
-        elif not (candidate_mae_improved or candidate_brier_improved):
+        elif not (
+            candidate_mae_improved or candidate_brier_improved or candidate_quality_additive
+        ):
             if candidate_mae_not_additive:
                 issues.append("global_mae_not_additive")
             if candidate_brier_not_additive:
@@ -3421,10 +3488,12 @@ class PredictiveTrainerManager:
             "active_positive_share": round(active_positive_share, 6),
             "candidate_global_mae_sol": candidate_mae,
             "active_global_mae_sol": active_mae,
+            "global_mae_additive_tolerance_sol": mae_additive_tolerance,
             "active_comparison_source": active_comparison_source,
             "active_comparison_error": active_comparison_error,
             "candidate_p_positive_after_cost_brier": candidate_brier,
             "active_p_positive_after_cost_brier": active_brier,
+            "p_positive_brier_additive_tolerance": brier_additive_tolerance,
         }
 
     def _promotion_blocked_reason(
