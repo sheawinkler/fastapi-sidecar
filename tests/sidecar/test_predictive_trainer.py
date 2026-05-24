@@ -13,7 +13,11 @@ from pathlib import Path
 import pytest
 
 import src.api.predictive_trainer as predictive_trainer
-from src.api.predictive_trainer import PredictiveTrainerConfig, PredictiveTrainerManager
+from src.api.predictive_trainer import (
+    PredictiveTrainerConfig,
+    PredictiveTrainerManager,
+    PromotionGateBlockedError,
+)
 
 SHADOW_CORPUS_FAMILY_ID = "predictive_candidate_firehose:raw_shadow:v1"
 
@@ -1537,6 +1541,63 @@ def test_health_payload_reports_current_when_latest_run_gated_no_change(tmp_path
     assert payload["shadow_row_lag_vs_active_model"] == 60
 
 
+def test_health_payload_sanitizes_promoted_gate_failed_latest_run(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager.config.training_path.write_text(
+        json.dumps(
+            {
+                "training": {"rows": 200, "shadow_rows": 200, "executed_rows": 1},
+                "validation": {
+                    "positive_rows": 120,
+                    "negative_rows": 80,
+                    "trained_at": "2026-04-07T03:38:24.484862Z",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager.config.model_path.write_text("{}", encoding="utf-8")
+    manager.config.calibration_path.write_text(
+        json.dumps({"rows": 10}), encoding="utf-8"
+    )
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 260)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+    manager._write_scheduler_state(
+        {
+            "last_run_id": "run-current",
+            "last_requested_by": "scheduler_interval",
+            "last_run_started_at": "2026-04-07T00:00:00Z",
+            "last_trigger_reason": "scheduler_interval",
+            "last_trigger_shadow_entry_count": 260,
+        }
+    )
+    manager._write_manifest(
+        "run-current",
+        {
+            "run_id": "run-current",
+            "status": "completed",
+            "raw_shadow_entry_count": 260,
+            "promotion": {
+                "state": "promoted_no_restart_live_process_running",
+                "gate_result": {
+                    "ok": False,
+                    "primary_issue": "global_mae_not_additive",
+                    "issues": ["global_mae_not_additive"],
+                },
+            },
+        },
+    )
+
+    payload = manager.health_payload()
+
+    assert payload["latest_completed_promotion_state"] == "gated_off"
+    assert (
+        payload["latest_completed_promotion_gate_blocked_reason"]
+        == "gate:global_mae_not_additive"
+    )
+    assert payload["model_freshness_state"] == "current_gated_no_change"
+
+
 def test_health_payload_reports_current_for_same_family_active_superset(tmp_path: Path):
     config = _make_config(tmp_path)
     manager = PredictiveTrainerManager(config)
@@ -2340,13 +2401,9 @@ async def test_shutdown_marks_running_manifest_cancelled(tmp_path: Path):
     assert manifest["error"]["type"] == "TrainerShutdown"
 
 
-@pytest.mark.asyncio
-async def test_promote_run_updates_manifest(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    manager = PredictiveTrainerManager(_make_config(tmp_path))
-    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 1)
-    run_id = "run-123"
+def _write_promote_run_fixture(
+    manager: PredictiveTrainerManager, run_id: str, promotion: dict[str, object]
+) -> Path:
     run_dir = manager._run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     model_path = run_dir / "model_candidate.json"
@@ -2356,7 +2413,6 @@ async def test_promote_run_updates_manifest(
     for path in (model_path, training_path, calibration_path):
         path.write_text("{}", encoding="utf-8")
     ledger_path.write_text('{"row":1}\n', encoding="utf-8")
-
     manager._write_manifest(
         run_id,
         {
@@ -2367,8 +2423,21 @@ async def test_promote_run_updates_manifest(
                 "candidate_calibration": str(calibration_path),
                 "candidate_ledger": str(ledger_path),
             },
-            "promotion": {"state": "not_attempted"},
+            "promotion": promotion,
         },
+    )
+    return run_dir
+
+
+@pytest.mark.asyncio
+async def test_promote_run_updates_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 1)
+    run_id = "run-123"
+    run_dir = _write_promote_run_fixture(
+        manager, run_id, {"state": "not_attempted", "gate_result": {"ok": True}}
     )
 
     monkeypatch.setattr(
@@ -2390,34 +2459,62 @@ async def test_promote_run_updates_manifest(
 
 
 @pytest.mark.asyncio
+async def test_promote_run_blocks_failed_promotion_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 1)
+    run_id = "run-gate-failed"
+    run_dir = _write_promote_run_fixture(
+        manager,
+        run_id,
+        {
+            "state": "gated_off",
+            "gate_result": {
+                "ok": False,
+                "primary_issue": "global_mae_not_additive",
+                "issues": ["global_mae_not_additive"],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        manager,
+        "_promote_candidate",
+        lambda **_kwargs: pytest.fail("gate-failed run must not promote"),
+    )
+
+    with pytest.raises(
+        PromotionGateBlockedError,
+        match="promotion_gate_blocked:gate:global_mae_not_additive",
+    ):
+        await manager.promote_run(run_id, forced=True)
+
+    assert not (run_dir / "promotion.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_promote_run_blocks_missing_promotion_gate(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 1)
+    run_id = "run-gate-missing"
+    _write_promote_run_fixture(manager, run_id, {"state": "not_attempted"})
+
+    with pytest.raises(
+        PromotionGateBlockedError,
+        match="promotion_gate_blocked:promotion_gate_missing",
+    ):
+        await manager.promote_run(run_id, forced=True)
+
+
+@pytest.mark.asyncio
 async def test_promote_run_uses_executor_helper(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 1)
     run_id = "run-executor"
-    run_dir = manager._run_dir(run_id)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    model_path = run_dir / "model_candidate.json"
-    training_path = run_dir / "prelaunch_training_candidate.json"
-    calibration_path = run_dir / "calibration_candidate.json"
-    ledger_path = run_dir / "next_state_ledger_candidate.jsonl"
-    for path in (model_path, training_path, calibration_path):
-        path.write_text("{}", encoding="utf-8")
-    ledger_path.write_text('{"row":1}\n', encoding="utf-8")
-
-    manager._write_manifest(
-        run_id,
-        {
-            "run_id": run_id,
-            "artifacts": {
-                "candidate_model": str(model_path),
-                "candidate_training": str(training_path),
-                "candidate_calibration": str(calibration_path),
-                "candidate_ledger": str(ledger_path),
-            },
-            "promotion": {"state": "not_attempted"},
-        },
+    _write_promote_run_fixture(
+        manager, run_id, {"state": "not_attempted", "gate_result": {"ok": True}}
     )
 
     captured: dict[str, object] = {}
