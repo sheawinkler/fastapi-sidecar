@@ -19,7 +19,6 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
-
 PREDICTIVE_CANDIDATE_FIREHOSE_TABLE = "predictive_candidate_firehose_shadow_outcomes"
 PREDICTIVE_CANDIDATE_FIREHOSE_STATS_TABLE = (
     "predictive_candidate_firehose_shadow_outcomes_stats"
@@ -326,13 +325,11 @@ def _read_shadow_sqlite_stats(path: Path) -> dict[str, Any]:
             select_columns.append("corpus_created_at")
         if "corpus_family_id" in stats_columns:
             select_columns.append("corpus_family_id")
-        row = conn.execute(
-            f"""
+        row = conn.execute(f"""
             SELECT {', '.join(select_columns)}
             FROM {PREDICTIVE_CANDIDATE_FIREHOSE_STATS_TABLE}
             WHERE singleton = 1
-            """
-        )
+            """)
         row = row.fetchone()
         if row:
             payload["current_shadow_entry_count"] = _safe_int(row[0], 0)
@@ -1460,6 +1457,7 @@ class PredictiveTrainerManager:
                 "shadow_local_sqlite_path": str(self.config.shadow_sqlite_path),
                 "shadow_local_json_path": str(self.config.shadow_index_path),
                 "shadow_local_duckdb_path": str(self.config.shadow_duckdb_path),
+                "shadow_local_paths_active": False,
             }
         return {
             "shadow_index_path": str(self.config.shadow_sqlite_path),
@@ -1468,6 +1466,7 @@ class PredictiveTrainerManager:
             "shadow_local_sqlite_path": str(self.config.shadow_sqlite_path),
             "shadow_local_json_path": str(self.config.shadow_index_path),
             "shadow_local_duckdb_path": str(self.config.shadow_duckdb_path),
+            "shadow_local_paths_active": True,
         }
 
     def _archive_shadow_corpus_sync(self) -> dict[str, Any]:
@@ -2211,6 +2210,12 @@ class PredictiveTrainerManager:
             if self.config.shadow_max_raw_entries is None
             else str(self.config.shadow_max_raw_entries)
         )
+        shadow_source = self._shadow_stats_source()
+        env["PREDICTIVE_SHADOW_SOURCE"] = shadow_source
+        if shadow_source == "runtime_analytics":
+            runtime_db_path = self._shadow_stats_path()
+            env["REAL_ALGOTRADER_RUNTIME_ANALYTICS_DB"] = str(runtime_db_path)
+            env["MEMMCP_RUNTIME_ANALYTICS_STORE_PATH"] = str(runtime_db_path)
         if self.config.shadow_snapshot_tmpdir is not None:
             env["PREDICTIVE_SHADOW_SNAPSHOT_TMPDIR"] = str(
                 self.config.shadow_snapshot_tmpdir
@@ -3629,7 +3634,7 @@ class PredictiveTrainerManager:
                 "--output",
                 str(model_candidate),
                 "--shadow-index",
-                str(self.config.shadow_sqlite_path),
+                str(self._shadow_stats_path()),
                 "--shadow-max-raw-entries",
                 (
                     "0"
