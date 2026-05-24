@@ -70,22 +70,18 @@ def _write_runtime_shadow_rows(
 ) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
-    conn.execute(
-        """
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS telemetry_queue (
             kind TEXT NOT NULL,
             file_name TEXT NOT NULL,
             timestamp_ms INTEGER NOT NULL,
             payload_json TEXT
         )
-        """
-    )
-    conn.execute(
-        """
+        """)
+    conn.execute("""
         CREATE INDEX IF NOT EXISTS telemetry_queue_file_name_timestamp_idx
         ON telemetry_queue(file_name, timestamp_ms DESC)
-        """
-    )
+        """)
     conn.execute("DELETE FROM telemetry_queue")
     rows = [
         (
@@ -854,6 +850,7 @@ def test_runtime_analytics_source_ignores_stale_cached_sqlite_count(tmp_path: Pa
     assert payload["shadow_index_path"] == str(runtime_db)
     assert payload["shadow_index_legacy_path"] is None
     assert payload["shadow_duckdb_path"] is None
+    assert payload["shadow_local_paths_active"] is False
     assert payload["shadow_local_sqlite_path"] == str(config.shadow_sqlite_path)
     assert payload["current_shadow_entry_count"] == 333
     assert payload["scheduler_trigger"]["shadow_index_source"] == "runtime_analytics"
@@ -1705,6 +1702,7 @@ def test_status_payload_reports_shadow_store_paths(tmp_path: Path):
     assert payload["shadow_index_path"] == str(manager.config.shadow_sqlite_path)
     assert payload["shadow_index_legacy_path"] == str(manager.config.shadow_index_path)
     assert payload["shadow_duckdb_path"] == str(manager.config.shadow_duckdb_path)
+    assert payload["shadow_local_paths_active"] is True
     assert payload["shadow_index_probe_state"] in {
         "available",
         "unavailable",
@@ -1917,6 +1915,48 @@ def test_run_logged_subprocess_exports_trainer_data_dir(tmp_path: Path):
     assert stdout_path.read_text(encoding="utf-8").strip() == str(
         manager.config.data_dir
     )
+
+
+def test_run_logged_subprocess_exports_runtime_shadow_source(tmp_path: Path):
+    runtime_db = tmp_path / "runtime_analytics.sqlite"
+    config = replace(
+        _make_config(tmp_path),
+        shadow_source="runtime_analytics",
+        runtime_analytics_db_path=runtime_db,
+    )
+    manager = PredictiveTrainerManager(config)
+    script_path = tmp_path / "runtime_env_probe.py"
+    script_path.write_text(
+        "\n".join(
+            [
+                "import json, os",
+                "print(json.dumps({",
+                "    'source': os.environ.get('PREDICTIVE_SHADOW_SOURCE'),",
+                "    'runtime_db': os.environ.get('REAL_ALGOTRADER_RUNTIME_ANALYTICS_DB'),",
+                "    'memmcp_db': os.environ.get('MEMMCP_RUNTIME_ANALYTICS_STORE_PATH'),",
+                "}))",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    returncode, stdout_text, stderr_text = manager._run_logged_subprocess(
+        cmd=[sys.executable, str(script_path)],
+        cwd=tmp_path,
+        stdout_path=tmp_path / "runtime-env.stdout.log",
+        stderr_path=tmp_path / "runtime-env.stderr.log",
+        timeout=5,
+    )
+
+    assert returncode == 0
+    assert stderr_text == ""
+    payload = json.loads(stdout_text)
+    assert payload == {
+        "source": "runtime_analytics",
+        "runtime_db": str(runtime_db),
+        "memmcp_db": str(runtime_db),
+    }
 
 
 def test_terminate_active_subprocess_stops_logged_subprocess(tmp_path: Path):
@@ -2343,6 +2383,81 @@ def test_run_cycle_sync_marks_failed_stage_on_train_error(
         manifest["error"]["message"]
         == "train step failed (7): shadow sqlite snapshot failed: snapshot failed for test"
     )
+
+
+def test_run_cycle_sync_uses_runtime_shadow_index_for_train_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    runtime_db = tmp_path / "runtime_analytics.sqlite"
+    config = replace(
+        _make_config(tmp_path),
+        shadow_source="runtime_analytics",
+        runtime_analytics_db_path=runtime_db,
+    )
+    manager = PredictiveTrainerManager(config)
+    manager.config.training_path.write_text(
+        json.dumps(
+            {
+                "training": {
+                    "rows": 10,
+                    "shadow_rows": 10,
+                    "executed_rows": 1,
+                    "version": "old",
+                },
+                "validation": {
+                    "positive_rows": 6,
+                    "negative_rows": 4,
+                    "trained_at": "2026-04-07T00:00:00Z",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager.config.model_path.write_text("{}", encoding="utf-8")
+    manager.config.calibration_path.write_text(
+        json.dumps({"rows": 1}), encoding="utf-8"
+    )
+    _write_runtime_shadow_rows(runtime_db, 220)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+
+    def _fake_logged_subprocess(*, cmd, cwd, stdout_path, stderr_path, timeout=None):
+        stdout_path.parent.mkdir(parents=True, exist_ok=True)
+        stdout_path.write_text("ok\n", encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+        script_arg = cmd[2] if len(cmd) > 2 and cmd[1] == "-u" else cmd[1]
+        script_name = Path(script_arg).name
+        if script_name == "build_mc_dataset.py":
+            dataset_dir = stdout_path.parent.parent / "dataset"
+            dataset_dir.mkdir(parents=True, exist_ok=True)
+            (dataset_dir / "dataset_latest.jsonl").write_text(
+                '{"row":1}\n', encoding="utf-8"
+            )
+            (dataset_dir / "dataset_latest_summary.json").write_text(
+                json.dumps(
+                    {
+                        "rows": 20,
+                        "ok": True,
+                        "quality_gates": {},
+                        "summary": str(dataset_dir / "dataset_latest_summary.json"),
+                        "unknown_sleeve_ratio": 0.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return 0, '{"ok": true}', ""
+        if script_name == "train_predictive_entry_model.py":
+            assert cmd[cmd.index("--shadow-index") + 1] == str(runtime_db)
+            return 7, "", '{"error":"stop after train command assertion"}'
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(manager, "_run_logged_subprocess", _fake_logged_subprocess)
+
+    manager._run_cycle_sync(
+        run_id="run-runtime-source", requested_by="manual", auto_promote=None
+    )
+
+    manifest = manager._read_manifest("run-runtime-source")
+    assert manifest["status"] == "failed"
 
 
 @pytest.mark.asyncio
