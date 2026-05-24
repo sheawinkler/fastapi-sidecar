@@ -428,7 +428,7 @@ def test_evaluate_candidate_accepts_improvement(tmp_path: Path):
     assert result["issues"] == []
 
 
-def test_evaluate_candidate_rejects_comparable_quality_drift(tmp_path: Path):
+def test_evaluate_candidate_rejects_beyond_additive_tolerance(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     active = {
         "training_rows": 100,
@@ -440,8 +440,8 @@ def test_evaluate_candidate_rejects_comparable_quality_drift(tmp_path: Path):
     }
     candidate_model = {
         "calibration": {
-            "global_mae_sol": 0.0054291091481175,
-            "tradeability_head_brier": {"p_positive_after_cost": 0.14712269037361925},
+            "global_mae_sol": 0.0055,
+            "tradeability_head_brier": {"p_positive_after_cost": 0.1505},
         }
     }
     candidate_attestation = {
@@ -459,6 +459,43 @@ def test_evaluate_candidate_rejects_comparable_quality_drift(tmp_path: Path):
     assert "global_mae_not_additive" in result["issues"]
     assert "p_positive_brier_not_additive" in result["issues"]
     assert "no_quality_metric_improved" in result["issues"]
+
+
+def test_evaluate_candidate_accepts_additive_near_equivalent_quality(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    active = {
+        "training_rows": 100,
+        "shadow_rows": 90,
+        "positive_rows": 60,
+        "negative_rows": 40,
+        "calibration_global_mae_sol": 0.0055925215025914325,
+        "p_positive_after_cost_brier": 0.14589883301739492,
+    }
+    candidate_model = {
+        "calibration": {
+            "global_mae_sol": 0.005604304687079369,
+            "tradeability_head_brier": {"p_positive_after_cost": 0.1473472660146796},
+        }
+    }
+    candidate_attestation = {
+        "training": {"rows": 120, "shadow_rows": 110},
+        "validation": {"positive_rows": 70, "negative_rows": 50},
+    }
+
+    result = manager._evaluate_candidate(
+        active=active,
+        candidate_model=candidate_model,
+        candidate_attestation=candidate_attestation,
+    )
+
+    assert result["ok"] is True
+    assert result["issues"] == []
+    assert result["global_mae_additive_tolerance_sol"] == pytest.approx(
+        active["calibration_global_mae_sol"] * 0.01
+    )
+    assert result["p_positive_brier_additive_tolerance"] == pytest.approx(
+        0.0015
+    )
 
 
 def test_evaluate_candidate_accepts_one_metric_gain_without_quality_drift(
