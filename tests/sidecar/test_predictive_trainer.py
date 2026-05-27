@@ -2829,6 +2829,67 @@ def test_health_payload_clears_stale_repo_not_launch_ready_pending_restart(
     assert manager._pending_restart is None
 
 
+def test_health_payload_clears_stale_pending_state_without_pending_restart(
+    tmp_path: Path,
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    manager.set_guidance_subscriber_count_provider(lambda: 1)
+    manager.config.training_path.write_text(
+        json.dumps(
+            {
+                "training": {
+                    "rows": 120,
+                    "shadow_rows": 110,
+                    "raw_shadow_entry_count": 220,
+                    "executed_rows": 6,
+                    "version": "predictive-entry-v12.2",
+                },
+                "validation": {
+                    "positive_rows": 70,
+                    "negative_rows": 50,
+                    "trained_at": "2026-04-09T03:36:05Z",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager.config.model_path.write_text(
+        json.dumps(
+            {
+                "version": "predictive-entry-v12.2",
+                "trained_at": "2026-04-09T03:36:05Z",
+                "selected_shadow_row_count": 110,
+                "raw_shadow_entry_count": 220,
+                "selected_executed_row_count": 6,
+                "selected_total_training_rows": 116,
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager.config.calibration_path.write_text(
+        json.dumps({"rows": 8}), encoding="utf-8"
+    )
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 220)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+    manager._write_manifest(
+        "run-stale-no-pending",
+        {
+            "run_id": "run-stale-no-pending",
+            "status": "completed",
+            "raw_shadow_entry_count": 220,
+            "promotion": {"state": "promoted_pending_restart"},
+        },
+    )
+    manager._pending_restart = None
+
+    payload = manager.health_payload()
+
+    assert payload["latest_completed_promotion_state"] == "promoted_pending_restart"
+    assert payload["effective_promotion_state"] == "promoted_current"
+    assert payload["pending_restart"] is None
+    assert manager._pending_restart is None
+
+
 def test_repo_launch_ready_fetches_origin_main_before_comparison(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
