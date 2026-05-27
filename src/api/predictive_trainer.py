@@ -3094,7 +3094,20 @@ class PredictiveTrainerManager:
             else None
         )
         effective_promotion_state = latest_completed_promotion_state
+        promoted_model_is_active = bool(
+            latest_completed_run_raw_shadow_entry_count > 0
+            and active_model_raw_shadow_entry_count
+            >= latest_completed_run_raw_shadow_entry_count
+        )
+        current_model_is_serving = (
+            self._guidance_subscriber_count() > 0 or promoted_model_is_active
+        )
         if not pending_restart:
+            if (
+                latest_completed_promotion_state == "promoted_pending_restart"
+                and current_model_is_serving
+            ):
+                effective_promotion_state = "promoted_current"
             return None, effective_promotion_state
 
         pending_run_id = (
@@ -3108,14 +3121,6 @@ class PredictiveTrainerManager:
             live_state.get("open_positions_remaining"), 0
         )
         repo_state = dict(repo_state or self._repo_launch_ready())
-        promoted_model_is_active = bool(
-            latest_completed_run_raw_shadow_entry_count > 0
-            and active_model_raw_shadow_entry_count
-            >= latest_completed_run_raw_shadow_entry_count
-        )
-        current_model_is_serving = (
-            self._guidance_subscriber_count() > 0 or promoted_model_is_active
-        )
 
         if open_positions_remaining > 0:
             pending_restart = {
