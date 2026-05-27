@@ -3349,6 +3349,22 @@ class PredictiveTrainerManager:
         candidate_corpus_instance = str(
             training.get("shadow_corpus_instance_id") or ""
         ).strip()
+        active_raw_shadow_entry_count = _safe_int(
+            active.get("raw_shadow_entry_count")
+            or active.get("shadow_corpus_entry_count"),
+            0,
+        )
+        candidate_raw_shadow_entry_count = _safe_int(
+            training.get("raw_shadow_entry_count")
+            or training.get("shadow_corpus_entry_count"),
+            0,
+        )
+        active_shadow_corpus_last_seq = _safe_int(
+            active.get("shadow_corpus_last_seq"), 0
+        )
+        candidate_shadow_corpus_last_seq = _safe_int(
+            training.get("shadow_corpus_last_seq"), 0
+        )
         row_count_gates_comparable = not (
             active_corpus_instance
             and candidate_corpus_instance
@@ -3450,6 +3466,17 @@ class PredictiveTrainerManager:
             and active_brier is not None
             and candidate_brier < active_brier
         )
+        same_corpus_advanced = row_count_gates_comparable and (
+            (
+                active_raw_shadow_entry_count > 0
+                and candidate_raw_shadow_entry_count > active_raw_shadow_entry_count
+            )
+            or (
+                active_shadow_corpus_last_seq > 0
+                and candidate_shadow_corpus_last_seq > active_shadow_corpus_last_seq
+            )
+        )
+        strict_quality_improved = candidate_mae_improved and candidate_brier_improved
         quality_metric_available = (
             candidate_mae is not None and active_mae is not None
         ) or (candidate_brier is not None and active_brier is not None)
@@ -3471,15 +3498,34 @@ class PredictiveTrainerManager:
                 issues.append("global_mae_degraded")
             if candidate_brier_degraded:
                 issues.append("p_positive_brier_degraded")
-        if row_count_gates_comparable:
+        waive_same_corpus_row_count_issues = bool(
+            row_count_issues and same_corpus_advanced and strict_quality_improved
+        )
+        if row_count_gates_comparable and not waive_same_corpus_row_count_issues:
             issues = row_count_issues + issues
             waived_row_count_issues: list[str] = []
         else:
             waived_row_count_issues = list(row_count_issues)
-            if row_count_issues and not candidate_mae_improved:
-                issues.append("row_count_regression_without_mae_improvement")
-            if row_count_issues and not candidate_brier_improved:
-                issues.append("row_count_regression_without_brier_improvement")
+            if row_count_issues and not strict_quality_improved:
+                if not candidate_mae_improved:
+                    issues.append("row_count_regression_without_mae_improvement")
+                if not candidate_brier_improved:
+                    issues.append("row_count_regression_without_brier_improvement")
+                if same_corpus_advanced and (
+                    candidate_mae_improved or candidate_brier_improved
+                ):
+                    issues.append("row_count_regression_without_full_quality_improvement")
+        row_count_gate_waiver_reason = None
+        if waived_row_count_issues:
+            row_count_gate_waiver_reason = (
+                "same_corpus_advanced_quality_improved"
+                if waive_same_corpus_row_count_issues
+                else (
+                    "non_comparable_corpus_quality_improved"
+                    if strict_quality_improved
+                    else "non_comparable_corpus"
+                )
+            )
 
         return {
             "ok": not issues,
@@ -3487,8 +3533,14 @@ class PredictiveTrainerManager:
             "primary_issue": issues[0] if issues else None,
             "row_count_gates_comparable": row_count_gates_comparable,
             "row_count_gate_waived_issues": waived_row_count_issues,
+            "row_count_gate_waiver_reason": row_count_gate_waiver_reason,
+            "same_corpus_advanced": same_corpus_advanced,
             "active_shadow_corpus_instance_id": active_corpus_instance or None,
             "candidate_shadow_corpus_instance_id": candidate_corpus_instance or None,
+            "active_raw_shadow_entry_count": active_raw_shadow_entry_count,
+            "candidate_raw_shadow_entry_count": candidate_raw_shadow_entry_count,
+            "active_shadow_corpus_last_seq": active_shadow_corpus_last_seq,
+            "candidate_shadow_corpus_last_seq": candidate_shadow_corpus_last_seq,
             "candidate_positive_share": round(candidate_positive_share, 6),
             "active_positive_share": round(active_positive_share, 6),
             "candidate_global_mae_sol": candidate_mae,

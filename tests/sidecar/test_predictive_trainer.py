@@ -605,6 +605,107 @@ def test_evaluate_candidate_waives_row_counts_for_non_comparable_runtime_corpus(
         "training_rows_not_improved",
         "shadow_rows_not_improved",
     ]
+    assert result["row_count_gate_waiver_reason"] == (
+        "non_comparable_corpus_quality_improved"
+    )
+
+
+def test_evaluate_candidate_waives_row_counts_for_advanced_same_corpus_quality_gain(
+    tmp_path: Path,
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    active = {
+        "training_rows": 24_437,
+        "shadow_rows": 24_050,
+        "positive_rows": 14_931,
+        "negative_rows": 9_506,
+        "calibration_global_mae_sol": 0.005605071021983755,
+        "p_positive_after_cost_brier": 0.14667613903679572,
+        "shadow_corpus_instance_id": "runtime_analytics:/tmp/runtime.sqlite",
+        "raw_shadow_entry_count": 121_493,
+        "shadow_corpus_last_seq": 1_779_898_596_730,
+    }
+    candidate_model = {
+        "calibration": {
+            "global_mae_sol": 0.005465926229890883,
+            "tradeability_head_brier": {"p_positive_after_cost": 0.11171112941904222},
+        }
+    }
+    candidate_attestation = {
+        "training": {
+            "rows": 584,
+            "shadow_rows": 197,
+            "shadow_corpus_instance_id": "runtime_analytics:/tmp/runtime.sqlite",
+            "raw_shadow_entry_count": 121_755,
+            "shadow_corpus_last_seq": 1_779_899_948_346,
+        },
+        "validation": {"positive_rows": 391, "negative_rows": 193},
+    }
+
+    result = manager._evaluate_candidate(
+        active=active,
+        candidate_model=candidate_model,
+        candidate_attestation=candidate_attestation,
+    )
+
+    assert result["ok"] is True
+    assert result["issues"] == []
+    assert result["row_count_gates_comparable"] is True
+    assert result["same_corpus_advanced"] is True
+    assert result["row_count_gate_waived_issues"] == [
+        "training_rows_not_improved",
+        "shadow_rows_not_improved",
+    ]
+    assert result["row_count_gate_waiver_reason"] == (
+        "same_corpus_advanced_quality_improved"
+    )
+
+
+def test_evaluate_candidate_keeps_same_corpus_row_gate_without_full_quality_gain(
+    tmp_path: Path,
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    active = {
+        "training_rows": 1000,
+        "shadow_rows": 800,
+        "positive_rows": 600,
+        "negative_rows": 400,
+        "calibration_global_mae_sol": 0.8,
+        "p_positive_after_cost_brier": 0.2,
+        "shadow_corpus_instance_id": "runtime_analytics:/tmp/runtime.sqlite",
+        "raw_shadow_entry_count": 1000,
+        "shadow_corpus_last_seq": 1000,
+    }
+    candidate_model = {
+        "calibration": {
+            "global_mae_sol": 0.7,
+            "tradeability_head_brier": {"p_positive_after_cost": 0.2},
+        }
+    }
+    candidate_attestation = {
+        "training": {
+            "rows": 120,
+            "shadow_rows": 70,
+            "shadow_corpus_instance_id": "runtime_analytics:/tmp/runtime.sqlite",
+            "raw_shadow_entry_count": 1100,
+            "shadow_corpus_last_seq": 1100,
+        },
+        "validation": {"positive_rows": 72, "negative_rows": 48},
+    }
+
+    result = manager._evaluate_candidate(
+        active=active,
+        candidate_model=candidate_model,
+        candidate_attestation=candidate_attestation,
+    )
+
+    assert result["ok"] is False
+    assert result["same_corpus_advanced"] is True
+    assert result["row_count_gate_waived_issues"] == []
+    assert result["issues"] == [
+        "training_rows_not_improved",
+        "shadow_rows_not_improved",
+    ]
 
 
 def test_evaluate_candidate_requires_quality_gain_to_waive_non_comparable_rows(
