@@ -1565,6 +1565,120 @@ def test_scheduler_trigger_retries_failed_run_for_lagging_current_corpus(
     assert trigger["last_run_status"] == "failed"
 
 
+def test_scheduler_trigger_retries_gated_off_run_after_new_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    config = _make_config(tmp_path)
+    manager = PredictiveTrainerManager(config)
+    now = predictive_trainer._parse_utc_ts("2026-04-07T00:15:00Z")
+    assert now is not None
+    monkeypatch.setattr(predictive_trainer, "_utc_now", lambda: now)
+    run_id = "run-gated-off"
+    _write_active_training_artifact(
+        config,
+        raw_shadow_entry_count=170,
+        shadow_rows=110,
+        rows=115,
+    )
+    manager._write_manifest(
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "completed",
+            "started_at": "2026-04-07T00:00:00Z",
+            "raw_shadow_entry_count": 200,
+            "shadow_corpus_instance_id": "corpus-a",
+            "shadow_corpus_family_id": SHADOW_CORPUS_FAMILY_ID,
+            "shadow_corpus_last_seq": 200,
+            "promotion": {
+                "state": "gated_off",
+                "gate_result": {
+                    "ok": False,
+                    "primary_issue": "global_mae_not_additive",
+                    "issues": ["global_mae_not_additive"],
+                },
+            },
+        },
+    )
+    manager._write_scheduler_state(
+        {
+            "last_run_id": run_id,
+            "last_requested_by": "scheduler_row_threshold",
+            "last_run_started_at": "2026-04-07T00:00:00Z",
+            "last_trigger_reason": "scheduler_row_threshold",
+            "last_trigger_shadow_entry_count": 200,
+        }
+    )
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 225)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+
+    trigger = manager._scheduler_trigger_payload()
+
+    assert trigger["should_start"] is True
+    assert trigger["requested_by"] == "scheduler_gated_off_retry"
+    assert trigger["reason"] == "gated_off_retry_new_rows"
+    assert trigger["row_threshold_reached"] is False
+    assert trigger["gated_off_retry_due"] is True
+    assert trigger["gated_off_run_has_new_rows"] is True
+    assert trigger["last_run_promotion_state"] == "gated_off"
+    assert trigger["new_shadow_rows_since_effective_baseline"] == 25
+
+
+def test_scheduler_trigger_does_not_retry_gated_off_run_without_new_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    config = _make_config(tmp_path)
+    manager = PredictiveTrainerManager(config)
+    now = predictive_trainer._parse_utc_ts("2026-04-07T00:15:00Z")
+    assert now is not None
+    monkeypatch.setattr(predictive_trainer, "_utc_now", lambda: now)
+    run_id = "run-gated-off"
+    _write_active_training_artifact(
+        config,
+        raw_shadow_entry_count=170,
+        shadow_rows=110,
+        rows=115,
+    )
+    manager._write_manifest(
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "completed",
+            "started_at": "2026-04-07T00:00:00Z",
+            "raw_shadow_entry_count": 200,
+            "shadow_corpus_instance_id": "corpus-a",
+            "shadow_corpus_family_id": SHADOW_CORPUS_FAMILY_ID,
+            "shadow_corpus_last_seq": 200,
+            "promotion": {
+                "state": "gated_off",
+                "gate_result": {
+                    "ok": False,
+                    "primary_issue": "global_mae_not_additive",
+                    "issues": ["global_mae_not_additive"],
+                },
+            },
+        },
+    )
+    manager._write_scheduler_state(
+        {
+            "last_run_id": run_id,
+            "last_requested_by": "scheduler_row_threshold",
+            "last_run_started_at": "2026-04-07T00:00:00Z",
+            "last_trigger_reason": "scheduler_row_threshold",
+            "last_trigger_shadow_entry_count": 200,
+        }
+    )
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 200)
+    manager._shadow_index_stats_cache = manager._refresh_shadow_index_stats_cache_sync()
+
+    trigger = manager._scheduler_trigger_payload()
+
+    assert trigger["should_start"] is False
+    assert trigger["reason"] == "current_corpus_newer_same_family"
+    assert trigger["gated_off_retry_due"] is False
+    assert trigger["gated_off_run_has_new_rows"] is False
+
+
 def test_health_payload_reports_model_freshness_state(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     manager.config.training_path.write_text(

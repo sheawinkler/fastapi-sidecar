@@ -2739,6 +2739,47 @@ class PredictiveTrainerManager:
                 or seconds_since_last_run_started >= failed_retry_backoff_secs
             )
         )
+        last_run_promotion = (
+            last_manifest.get("promotion") if isinstance(last_manifest, dict) else None
+        )
+        if not isinstance(last_run_promotion, dict):
+            last_run_promotion = {}
+        last_run_promotion_state = (
+            str(last_run_promotion.get("state") or "").strip().lower()
+        )
+        last_manifest_raw_shadow_entry_count = _safe_int(
+            last_manifest.get("raw_shadow_entry_count")
+            if isinstance(last_manifest, dict)
+            else None,
+            0,
+        )
+        current_shadow_corpus_last_seq = _safe_int(
+            corpus_state.get("shadow_corpus_last_seq")
+            or shadow_stats.get("shadow_index_last_seq"),
+            0,
+        )
+        last_manifest_shadow_corpus_last_seq = _safe_int(
+            last_manifest.get("shadow_corpus_last_seq")
+            if isinstance(last_manifest, dict)
+            else None,
+            0,
+        )
+        gated_off_run_has_new_rows = (
+            current_shadow_entry_count > last_manifest_raw_shadow_entry_count
+            or (
+                current_shadow_corpus_last_seq > 0
+                and last_manifest_shadow_corpus_last_seq > 0
+                and current_shadow_corpus_last_seq > last_manifest_shadow_corpus_last_seq
+            )
+        )
+        gated_off_retry_due = (
+            last_manifest_status == "completed"
+            and last_run_promotion_state == "gated_off"
+            and gated_off_run_has_new_rows
+            and corpus_advanced_beyond_active_model
+            and shadow_row_lag_vs_active_model > 0
+            and interval_elapsed
+        )
         requested_by: str | None = None
         reason = "waiting"
         should_start = False
@@ -2757,6 +2798,10 @@ class PredictiveTrainerManager:
         elif row_threshold_reached:
             reason = "row_threshold"
             requested_by = "scheduler_row_threshold"
+            should_start = True
+        elif gated_off_retry_due:
+            reason = "gated_off_retry_new_rows"
+            requested_by = "scheduler_gated_off_retry"
             should_start = True
         elif max_staleness_reached:
             reason = "max_staleness"
@@ -2788,8 +2833,11 @@ class PredictiveTrainerManager:
             "max_staleness_reached": max_staleness_reached,
             "row_threshold_reached": row_threshold_reached,
             "failed_run_retry_due": failed_run_retry_due,
+            "gated_off_retry_due": gated_off_retry_due,
+            "gated_off_run_has_new_rows": gated_off_run_has_new_rows,
             "failed_retry_backoff_secs": failed_retry_backoff_secs,
             "last_run_status": last_manifest_status or None,
+            "last_run_promotion_state": last_run_promotion_state or None,
             "seconds_since_last_run_started": seconds_since_last_run_started,
             "last_run_id": state.get("last_run_id"),
             "last_requested_by": state.get("last_requested_by"),
