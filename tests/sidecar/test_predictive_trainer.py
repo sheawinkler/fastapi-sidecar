@@ -3276,7 +3276,13 @@ def test_promote_candidate_relaunch_uses_wrapper_replace_env(
     assert result["state"] == "promoted_and_relaunch_requested"
     assert result["restart_pid"] == 4242
     assert result["restart_dispatch"] == "detached_wrapper"
-    assert captured["cmd"] == [str(manager.config.deploy_script_path), "--live"]
+    assert captured["cmd"] == [
+        str(manager.config.deploy_script_path),
+        "--live",
+        "--skip-build",
+    ]
+    assert result["restart_command"] == captured["cmd"]
+    assert result["restart_skip_build"] is True
     assert captured["env"]["DEPLOY_WRAPPER_REPLACE_EXISTING"] == "1"
     assert captured["env"]["ALGOTRADER_WALLET"] == str(manager.config.wallet_path)
     assert captured["env"]["SIDECAR_REQUIRE_HEALTH"] == "0"
@@ -3339,7 +3345,7 @@ def test_promote_candidate_defers_when_wrapper_active(
     }
 
 
-def test_promote_candidate_skips_restart_when_live_process_running(
+def test_promote_candidate_relaunches_when_live_process_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
@@ -3368,12 +3374,19 @@ def test_promote_candidate_skips_restart_when_live_process_running(
     )
     monkeypatch.setattr(manager, "_active_deploy_wrapper_pid", lambda: None)
     monkeypatch.setattr(manager, "_active_live_trader_pid", lambda: 8888)
-    monkeypatch.setattr(
-        "src.api.predictive_trainer.subprocess.Popen",
-        lambda *_args, **_kwargs: pytest.fail(
-            "restart wrapper should not spawn when live trader is active"
-        ),
-    )
+
+    captured: dict[str, object] = {}
+
+    class _Process:
+        pid = 5151
+
+    def _fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env")
+        captured["start_new_session"] = kwargs.get("start_new_session")
+        return _Process()
+
+    monkeypatch.setattr("src.api.predictive_trainer.subprocess.Popen", _fake_popen)
 
     result = manager._promote_candidate(
         run_id=run_id,
@@ -3384,8 +3397,18 @@ def test_promote_candidate_skips_restart_when_live_process_running(
         forced=False,
     )
 
-    assert result["state"] == "promoted_no_restart_live_process_running"
+    assert result["state"] == "promoted_and_relaunch_requested"
     assert result["active_live_pid"] == 8888
+    assert result["restart_replaces_active_live"] is True
+    assert result["restart_pid"] == 5151
+    assert result["restart_dispatch"] == "detached_wrapper"
+    assert captured["cmd"] == [
+        str(manager.config.deploy_script_path),
+        "--live",
+        "--skip-build",
+    ]
+    assert captured["env"]["DEPLOY_WRAPPER_REPLACE_EXISTING"] == "1"
+    assert captured["start_new_session"] is True
     assert manager._pending_restart is None
 
 
