@@ -2224,6 +2224,32 @@ class PredictiveTrainerManager:
             "model_freshness_state": "running_catching_up",
         }
 
+    def _active_run_health_overlay(self) -> dict[str, Any]:
+        active_overlay = self._active_run_status_overlay()
+        if not active_overlay:
+            return {
+                "active_run_id": None,
+                "active_run": None,
+                "active_run_stage": None,
+                "active_run_stage_started_at": None,
+                "active_run_stage_updated_at": None,
+                "active_run_stage_message": None,
+            }
+        return {
+            "active_run_id": active_overlay.get("active_run_id"),
+            "active_run": active_overlay.get("active_run"),
+            "active_run_stage": active_overlay.get("active_run_stage"),
+            "active_run_stage_started_at": active_overlay.get(
+                "active_run_stage_started_at"
+            ),
+            "active_run_stage_updated_at": active_overlay.get(
+                "active_run_stage_updated_at"
+            ),
+            "active_run_stage_message": active_overlay.get(
+                "active_run_stage_message"
+            ),
+        }
+
     def _suppress_scheduler_trigger_while_running(
         self, payload: dict[str, Any]
     ) -> None:
@@ -4455,7 +4481,7 @@ class PredictiveTrainerManager:
     def _health_payload_deep_sync(self) -> dict[str, Any]:
         self._reconcile_run_state()
         freshness = self._freshness_payload()
-        return {
+        payload = {
             "status": "ok",
             **self._scheduler_contract_payload(),
             "auto_promote": self.config.auto_promote,
@@ -4494,7 +4520,12 @@ class PredictiveTrainerManager:
             "scheduler_runtime": self._scheduler_runtime_payload(),
             "scheduler_trigger": self._scheduler_trigger_payload(),
             **freshness,
+            **self._active_run_health_overlay(),
         }
+        if payload["is_running"]:
+            payload["model_freshness_state"] = "running_catching_up"
+            self._suppress_scheduler_trigger_while_running(payload)
+        return payload
 
     def _status_payload_deep_sync(self) -> dict[str, Any]:
         self._reconcile_run_state()
@@ -4544,6 +4575,7 @@ class PredictiveTrainerManager:
         if active_overlay:
             payload["is_running"] = True
             payload["model_freshness_state"] = "running_catching_up"
+            payload.update(self._active_run_health_overlay())
             self._suppress_scheduler_trigger_while_running(payload)
         payload.update(
             self._snapshot_metadata(
