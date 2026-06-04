@@ -24,7 +24,7 @@ PREDICTIVE_CANDIDATE_FIREHOSE_STATS_TABLE = (
     "predictive_candidate_firehose_shadow_outcomes_stats"
 )
 SHADOW_CORPUS_FAMILY_ID = "predictive_candidate_firehose:raw_shadow:v1"
-DEFAULT_SHADOW_MAX_RAW_ENTRIES = 1_000
+DEFAULT_SHADOW_MAX_RAW_ENTRIES = 20_000
 DEFAULT_TRAIN_TIMEOUT_SECS = 200_000
 DEFAULT_RUNTIME_ANALYTICS_DB = Path(
     "/Volumes/wd_black/runtime.noindex/algotrader/runtime_analytics.sqlite"
