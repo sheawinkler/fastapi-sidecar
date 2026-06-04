@@ -3550,12 +3550,24 @@ class PredictiveTrainerManager:
                 and candidate_shadow_corpus_last_seq > active_shadow_corpus_last_seq
             )
         )
-        strict_quality_improved = candidate_mae_improved and candidate_brier_improved
         quality_metric_available = (
             candidate_mae is not None and active_mae is not None
         ) or (candidate_brier is not None and active_brier is not None)
         candidate_quality_additive = (
             not candidate_mae_not_additive and not candidate_brier_not_additive
+        )
+        candidate_quality_gate_clean = (
+            (
+                candidate_mae_improved
+                or candidate_brier_improved
+                or candidate_quality_additive
+            )
+            and not candidate_mae_degraded
+            and not candidate_brier_degraded
+        )
+        row_count_waiver_quality_ok = (
+            (candidate_mae_improved or candidate_brier_improved)
+            and candidate_quality_gate_clean
         )
         if not quality_metric_available:
             issues.append("promotion_quality_metrics_missing")
@@ -3573,14 +3585,14 @@ class PredictiveTrainerManager:
             if candidate_brier_degraded:
                 issues.append("p_positive_brier_degraded")
         waive_same_corpus_row_count_issues = bool(
-            row_count_issues and same_corpus_advanced and strict_quality_improved
+            row_count_issues and same_corpus_advanced and row_count_waiver_quality_ok
         )
         if row_count_gates_comparable and not waive_same_corpus_row_count_issues:
             issues = row_count_issues + issues
             waived_row_count_issues: list[str] = []
         else:
             waived_row_count_issues = list(row_count_issues)
-            if row_count_issues and not strict_quality_improved:
+            if row_count_issues and not row_count_waiver_quality_ok:
                 if not candidate_mae_improved:
                     issues.append("row_count_regression_without_mae_improvement")
                 if not candidate_brier_improved:
@@ -3592,11 +3604,11 @@ class PredictiveTrainerManager:
         row_count_gate_waiver_reason = None
         if waived_row_count_issues:
             row_count_gate_waiver_reason = (
-                "same_corpus_advanced_quality_improved"
+                "same_corpus_advanced_quality_gate_clean_with_metric_gain"
                 if waive_same_corpus_row_count_issues
                 else (
-                    "non_comparable_corpus_quality_improved"
-                    if strict_quality_improved
+                    "non_comparable_corpus_quality_gate_clean_with_metric_gain"
+                    if row_count_waiver_quality_ok
                     else "non_comparable_corpus"
                 )
             )
