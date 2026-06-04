@@ -4215,10 +4215,8 @@ class PredictiveTrainerManager:
 
         active_live_pid = self._active_live_trader_pid()
         if active_live_pid is not None:
-            promotion["state"] = "promoted_no_restart_live_process_running"
             promotion["active_live_pid"] = active_live_pid
-            self._pending_restart = None
-            return promotion
+            promotion["restart_replaces_active_live"] = True
 
         restart_log = self._run_dir(run_id) / "logs" / "restart.stdout.log"
         restart_err = self._run_dir(run_id) / "logs" / "restart.stderr.log"
@@ -4231,12 +4229,18 @@ class PredictiveTrainerManager:
             restart_env["SIDECAR_REQUIRE_HEALTH"] = "0"
             restart_env["SIDECAR_SKIP_POST_LAUNCH_TRAINER_TRIGGER"] = "1"
             restart_env.pop("REAL_ALGOTRADER_WALLET", None)
+            restart_cmd = [str(self.config.deploy_script_path), "--live"]
+            relaunch_skip_build = _env_bool(
+                "SIDECAR_PREDICTIVE_TRAINER_RELAUNCH_SKIP_BUILD", True
+            )
+            if relaunch_skip_build:
+                restart_cmd.append("--skip-build")
             restart_log.parent.mkdir(parents=True, exist_ok=True)
             with restart_log.open("w", encoding="utf-8") as stdout_fh, restart_err.open(
                 "w", encoding="utf-8"
             ) as stderr_fh:
                 restart_process = subprocess.Popen(
-                    [str(self.config.deploy_script_path), "--live"],
+                    restart_cmd,
                     cwd=self.config.algo_repo_dir,
                     stdout=stdout_fh,
                     stderr=stderr_fh,
@@ -4247,6 +4251,8 @@ class PredictiveTrainerManager:
             promotion["state"] = "promoted_and_relaunch_requested"
             promotion["restart_pid"] = restart_process.pid
             promotion["restart_dispatch"] = "detached_wrapper"
+            promotion["restart_command"] = restart_cmd
+            promotion["restart_skip_build"] = relaunch_skip_build
             self._pending_restart = None
         except Exception as exc:
             restart_log.write_text("", encoding="utf-8")
