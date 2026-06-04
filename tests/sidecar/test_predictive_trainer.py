@@ -2037,9 +2037,45 @@ def test_status_payload_overlays_active_run_on_cached_idle_snapshot(tmp_path: Pa
     assert status["scheduler_trigger"]["should_start"] is False
     assert status["scheduler_trigger"]["reason"] == "already_running"
     assert health["is_running"] is True
+    assert health["status"] == "ok"
+    assert health["active_run_id"] == run_id
+    assert health["active_run_stage"] == "train"
+    assert health["active_run_stage_message"] == "training candidate model"
     assert health["model_freshness_state"] == "running_catching_up"
     assert health["scheduler_trigger"]["should_start"] is False
     assert health["scheduler_trigger"]["reason"] == "already_running"
+
+
+def test_health_payload_deep_reports_active_run_stage(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    run_id = "run-deep-health-active"
+    manager._active_run_id = run_id
+
+    class _NeverDoneTask:
+        def done(self) -> bool:
+            return False
+
+    manager._current_task = _NeverDoneTask()
+    manager._write_manifest(
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "running",
+            "stage": "dataset",
+            "stage_started_at": "2026-04-07T00:00:00Z",
+            "stage_updated_at": "2026-04-07T00:00:05Z",
+            "stage_message": "building training dataset",
+        },
+    )
+
+    payload = manager._health_payload_deep_sync()
+
+    assert payload["status"] == "ok"
+    assert payload["is_running"] is True
+    assert payload["active_run_id"] == run_id
+    assert payload["active_run_stage"] == "dataset"
+    assert payload["active_run_stage_message"] == "building training dataset"
+    assert payload["model_freshness_state"] == "running_catching_up"
 
 
 def test_status_payload_tolerates_missing_manifest_for_active_run(tmp_path: Path):
