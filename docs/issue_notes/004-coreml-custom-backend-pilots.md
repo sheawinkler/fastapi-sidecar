@@ -65,6 +65,13 @@ pip install coremltools
 python scripts/build_coreml_pilot.py --samples 800 --epochs 35
 ```
 
+If `coremltools` is unavailable and only the custom JSON backend is needed,
+build the surrogate checkpoint without Core ML export:
+
+```bash
+python scripts/build_coreml_pilot.py --samples 800 --epochs 35 --skip-coreml
+```
+
 3. Export custom JSON backend:
 
 ```bash
