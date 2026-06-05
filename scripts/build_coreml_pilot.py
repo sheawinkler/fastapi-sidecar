@@ -30,7 +30,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.ai.ensemble_orchestrator import EnsembleOrchestrator  # noqa: E402
+try:
+    from src.ai.ensemble_orchestrator import EnsembleOrchestrator  # type: ignore # noqa: E402
+except ModuleNotFoundError as exc:  # pragma: no cover - depends on runtime environment
+    EnsembleOrchestrator = None  # type: ignore
+    ENSEMBLE_IMPORT_ERROR: ModuleNotFoundError | None = exc
+else:
+    ENSEMBLE_IMPORT_ERROR = None
 
 
 @dataclass
@@ -268,6 +274,11 @@ def main() -> int:
         default="features",
         help="Core ML input tensor name",
     )
+    parser.add_argument(
+        "--skip-coreml",
+        action="store_true",
+        help="Build only the torch surrogate checkpoint; useful for custom_export without coremltools.",
+    )
     args = parser.parse_args()
     _set_global_seeds(args.seed)
 
@@ -278,6 +289,12 @@ def main() -> int:
         input_dim=args.input_dim,
         seed=args.seed,
     )
+
+    if EnsembleOrchestrator is None:
+        raise RuntimeError(
+            "Unable to import EnsembleOrchestrator. Run with the sidecar requirements installed, "
+            "for example: uv run --with-requirements requirements.txt python scripts/build_coreml_pilot.py"
+        ) from ENSEMBLE_IMPORT_ERROR
 
     ensemble = EnsembleOrchestrator(input_dim=args.input_dim)
     targets = _teacher_probabilities(ensemble, sampled)
@@ -318,18 +335,32 @@ def main() -> int:
     }
     torch.save(checkpoint, args.checkpoint_path)
 
-    _export_coreml(
-        model,
-        input_dim=args.input_dim,
-        output_path=args.coreml_path,
-        input_name=args.input_name,
-    )
+    coreml_export: Dict[str, Any]
+    if args.skip_coreml:
+        coreml_export = {
+            "status": "skipped",
+            "reason": "skip_coreml_requested",
+            "coreml_path": str(args.coreml_path),
+        }
+    else:
+        _export_coreml(
+            model,
+            input_dim=args.input_dim,
+            output_path=args.coreml_path,
+            input_name=args.input_name,
+        )
+        coreml_export = {
+            "status": "exported",
+            "reason": None,
+            "coreml_path": str(args.coreml_path),
+        }
 
     manifest = {
         "status": "ok",
         "schema_version": "coreml_proxy_v1",
         "created_at": datetime.now(UTC).isoformat(),
         "coreml_path": str(args.coreml_path),
+        "coreml_export": coreml_export,
         "checkpoint_path": str(args.checkpoint_path),
         "input_name": args.input_name,
         "input_dim": args.input_dim,
