@@ -865,7 +865,104 @@ def test_evaluate_candidate_rejects_positive_share_collapse(tmp_path: Path):
     )
 
     assert result["ok"] is False
+    assert result["positive_share_collapsed"] is True
+    assert result["positive_share_collapse_waived"] is False
     assert "positive_share_collapsed" in result["issues"]
+
+
+def test_evaluate_candidate_waives_positive_share_collapse_for_stale_same_corpus(
+    tmp_path: Path,
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    active = {
+        "training_rows": 100,
+        "shadow_rows": 90,
+        "positive_rows": 70,
+        "negative_rows": 30,
+        "raw_shadow_entry_count": 1_000,
+        "shadow_corpus_last_seq": 10_000,
+        "shadow_corpus_instance_id": "runtime_analytics:/tmp/runtime.sqlite",
+        "calibration_global_mae_sol": 0.0055,
+        "p_positive_after_cost_brier": 0.148,
+    }
+    candidate_model = {
+        "calibration": {
+            "global_mae_sol": 0.0053,
+            "tradeability_head_brier": {"p_positive_after_cost": 0.155},
+        }
+    }
+    candidate_attestation = {
+        "training": {
+            "rows": 140,
+            "shadow_rows": 130,
+            "raw_shadow_entry_count": 2_500,
+            "shadow_corpus_last_seq": 20_000,
+            "shadow_corpus_instance_id": "runtime_analytics:/tmp/runtime.sqlite",
+        },
+        "validation": {"positive_rows": 48, "negative_rows": 72},
+    }
+
+    result = manager._evaluate_candidate(
+        active=active,
+        candidate_model=candidate_model,
+        candidate_attestation=candidate_attestation,
+    )
+
+    assert result["ok"] is True
+    assert result["same_corpus_advanced"] is True
+    assert result["same_corpus_materially_advanced"] is True
+    assert result["positive_share_collapsed"] is True
+    assert result["positive_share_collapse_waived"] is True
+    assert (
+        result["positive_share_collapse_waiver_reason"]
+        == "same_corpus_materially_advanced_mae_improved_not_degraded"
+    )
+    assert "positive_share_collapsed" not in result["issues"]
+
+
+def test_evaluate_candidate_keeps_positive_share_gate_when_brier_degraded(
+    tmp_path: Path,
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    active = {
+        "training_rows": 100,
+        "shadow_rows": 90,
+        "positive_rows": 70,
+        "negative_rows": 30,
+        "raw_shadow_entry_count": 1_000,
+        "shadow_corpus_last_seq": 10_000,
+        "shadow_corpus_instance_id": "runtime_analytics:/tmp/runtime.sqlite",
+        "calibration_global_mae_sol": 0.0055,
+        "p_positive_after_cost_brier": 0.148,
+    }
+    candidate_model = {
+        "calibration": {
+            "global_mae_sol": 0.0053,
+            "tradeability_head_brier": {"p_positive_after_cost": 0.20},
+        }
+    }
+    candidate_attestation = {
+        "training": {
+            "rows": 140,
+            "shadow_rows": 130,
+            "raw_shadow_entry_count": 2_500,
+            "shadow_corpus_last_seq": 20_000,
+            "shadow_corpus_instance_id": "runtime_analytics:/tmp/runtime.sqlite",
+        },
+        "validation": {"positive_rows": 48, "negative_rows": 72},
+    }
+
+    result = manager._evaluate_candidate(
+        active=active,
+        candidate_model=candidate_model,
+        candidate_attestation=candidate_attestation,
+    )
+
+    assert result["ok"] is False
+    assert result["positive_share_collapsed"] is True
+    assert result["positive_share_collapse_waived"] is False
+    assert "positive_share_collapsed" in result["issues"]
+    assert "p_positive_brier_degraded" in result["issues"]
 
 
 def test_build_attestation_carries_provenance_summary(tmp_path: Path):

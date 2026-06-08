@@ -3450,11 +3450,10 @@ class PredictiveTrainerManager:
             row_count_issues.append("training_rows_not_improved")
         if candidate_shadow_rows <= _safe_int(active.get("shadow_rows"), 0):
             row_count_issues.append("shadow_rows_not_improved")
-        if (
+        positive_share_collapsed = (
             candidate_positive_share + self.config.positive_share_collapse_tolerance
             < active_positive_share
-        ):
-            issues.append("positive_share_collapsed")
+        )
 
         candidate_calibration = candidate_model.get("calibration", {})
         candidate_mae = _safe_float(candidate_calibration.get("global_mae_sol"))
@@ -3550,6 +3549,21 @@ class PredictiveTrainerManager:
                 and candidate_shadow_corpus_last_seq > active_shadow_corpus_last_seq
             )
         )
+        same_corpus_materially_advanced = same_corpus_advanced and (
+            (
+                active_raw_shadow_entry_count > 0
+                and candidate_raw_shadow_entry_count
+                >= max(
+                    active_raw_shadow_entry_count + self.config.min_new_shadow_rows_to_trigger,
+                    int(active_raw_shadow_entry_count * 1.25),
+                )
+            )
+            or (
+                active_raw_shadow_entry_count <= 0
+                and active_shadow_corpus_last_seq > 0
+                and candidate_shadow_corpus_last_seq > active_shadow_corpus_last_seq
+            )
+        )
         quality_metric_available = (
             candidate_mae is not None and active_mae is not None
         ) or (candidate_brier is not None and active_brier is not None)
@@ -3569,6 +3583,23 @@ class PredictiveTrainerManager:
             (candidate_mae_improved or candidate_brier_improved)
             and candidate_quality_gate_clean
         )
+        positive_share_collapse_waived = bool(
+            positive_share_collapsed
+            and same_corpus_materially_advanced
+            and not row_count_issues
+            and candidate_mae_improved
+            and candidate_quality_gate_clean
+            and not candidate_mae_degraded
+            and not candidate_brier_degraded
+            and candidate_positive_share >= 0.30
+        )
+        positive_share_collapse_waiver_reason = (
+            "same_corpus_materially_advanced_mae_improved_not_degraded"
+            if positive_share_collapse_waived
+            else None
+        )
+        if positive_share_collapsed and not positive_share_collapse_waived:
+            issues.append("positive_share_collapsed")
         if not quality_metric_available:
             issues.append("promotion_quality_metrics_missing")
         elif not (
@@ -3627,8 +3658,14 @@ class PredictiveTrainerManager:
             "candidate_raw_shadow_entry_count": candidate_raw_shadow_entry_count,
             "active_shadow_corpus_last_seq": active_shadow_corpus_last_seq,
             "candidate_shadow_corpus_last_seq": candidate_shadow_corpus_last_seq,
+            "same_corpus_materially_advanced": same_corpus_materially_advanced,
             "candidate_positive_share": round(candidate_positive_share, 6),
             "active_positive_share": round(active_positive_share, 6),
+            "positive_share_collapsed": positive_share_collapsed,
+            "positive_share_collapse_waived": positive_share_collapse_waived,
+            "positive_share_collapse_waiver_reason": (
+                positive_share_collapse_waiver_reason
+            ),
             "candidate_global_mae_sol": candidate_mae,
             "active_global_mae_sol": active_mae,
             "global_mae_additive_tolerance_sol": mae_additive_tolerance,
