@@ -3089,6 +3089,52 @@ async def test_promote_run_blocks_failed_promotion_gate(
 
 
 @pytest.mark.asyncio
+async def test_promote_run_recomputes_positive_share_blocked_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 1)
+    run_id = "run-stale-positive-share"
+    _write_promote_run_fixture(
+        manager,
+        run_id,
+        {
+            "state": "gated_off",
+            "gate_result": {
+                "ok": False,
+                "primary_issue": "positive_share_collapsed",
+                "issues": ["positive_share_collapsed"],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        manager,
+        "_recompute_positive_share_blocked_gate",
+        lambda **_kwargs: {
+            "ok": True,
+            "issues": [],
+            "positive_share_collapsed": True,
+            "positive_share_collapse_waived": True,
+        },
+    )
+    monkeypatch.setattr(
+        manager,
+        "_promote_candidate",
+        lambda **_kwargs: {"state": "promoted_pending_restart", "forced": True},
+    )
+
+    result = await manager.promote_run(run_id, forced=True)
+    updated = manager._read_manifest(run_id)
+
+    assert result["state"] == "promoted_pending_restart"
+    assert updated["promotion"]["gate_result"]["ok"] is True
+    assert updated["promotion"]["gate_recompute_source"] == (
+        "manual_promotion_current_evaluator"
+    )
+    assert updated["promotion"]["state"] == "promoted_pending_restart"
+
+
+@pytest.mark.asyncio
 async def test_promote_run_blocks_missing_promotion_gate(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     _write_shadow_sqlite_count(manager.config.shadow_sqlite_path, 1)
