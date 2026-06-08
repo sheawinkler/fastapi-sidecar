@@ -3701,6 +3701,51 @@ class PredictiveTrainerManager:
             auto_promote_enabled=True,
         )
 
+    def _recompute_positive_share_blocked_gate(
+        self, *, run_id: str, manifest: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        promotion = manifest.get("promotion") or {}
+        gate_result = promotion.get("gate_result")
+        if not isinstance(gate_result, dict):
+            return None
+        issues = gate_result.get("issues")
+        if not isinstance(issues, list):
+            issues = []
+        primary_issue = str(gate_result.get("primary_issue") or "").strip()
+        if primary_issue != "positive_share_collapsed" and (
+            "positive_share_collapsed" not in {str(issue) for issue in issues}
+        ):
+            return None
+
+        artifacts = manifest.get("artifacts") or {}
+        model_candidate = Path(str(artifacts.get("candidate_model") or ""))
+        if not model_candidate.exists():
+            return None
+        run_dir = self._run_dir(run_id)
+        dataset_dir = run_dir / "dataset"
+        dataset_path = dataset_dir / "dataset_latest.jsonl"
+        dataset_summary_path = dataset_dir / "dataset_latest_summary.json"
+        dataset_summary = {}
+        if dataset_summary_path.exists():
+            with contextlib.suppress(Exception):
+                dataset_summary = _read_json(dataset_summary_path)
+        try:
+            candidate_model = _read_json(model_candidate)
+            candidate_attestation = self._build_attestation(
+                candidate_model_path=model_candidate,
+                dataset_path=dataset_path,
+                dataset_summary=dataset_summary,
+                dataset_summary_path=dataset_summary_path,
+                candidate_output_hint=model_candidate,
+            )
+            return self._evaluate_candidate(
+                active=self._active_artifacts(),
+                candidate_model=candidate_model,
+                candidate_attestation=candidate_attestation,
+            )
+        except Exception:
+            return None
+
     async def start_run(
         self,
         *,
@@ -4329,6 +4374,23 @@ class PredictiveTrainerManager:
             promotion_record.get("gate_result"),
             missing_blocks=True,
         )
+        if gate_blocked_reason:
+            recomputed_gate = self._recompute_positive_share_blocked_gate(
+                run_id=run_id, manifest=manifest
+            )
+            if recomputed_gate is not None:
+                promotion_record = {
+                    **promotion_record,
+                    "gate_result": recomputed_gate,
+                    "gate_recomputed_at": _utc_iso(),
+                    "gate_recompute_source": "manual_promotion_current_evaluator",
+                }
+                manifest["promotion"] = promotion_record
+                self._write_manifest(run_id, manifest)
+                gate_blocked_reason = self._promotion_gate_blocked_reason(
+                    recomputed_gate,
+                    missing_blocks=True,
+                )
         if gate_blocked_reason:
             self._append_history(
                 {
