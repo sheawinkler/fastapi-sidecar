@@ -2798,10 +2798,21 @@ class PredictiveTrainerManager:
                 and current_shadow_corpus_last_seq > last_manifest_shadow_corpus_last_seq
             )
         )
+        gated_off_run_new_shadow_rows = (
+            max(0, current_shadow_entry_count - last_manifest_raw_shadow_entry_count)
+            if current_shadow_entry_count > 0
+            and last_manifest_raw_shadow_entry_count > 0
+            else 0
+        )
+        gated_off_run_min_new_rows_reached = (
+            gated_off_run_new_shadow_rows
+            >= self.config.min_new_shadow_rows_to_trigger
+        )
         gated_off_retry_due = (
             last_manifest_status == "completed"
             and last_run_promotion_state == "gated_off"
             and gated_off_run_has_new_rows
+            and gated_off_run_min_new_rows_reached
             and corpus_advanced_beyond_active_model
             and shadow_row_lag_vs_active_model > 0
             and interval_elapsed
@@ -2861,6 +2872,10 @@ class PredictiveTrainerManager:
             "failed_run_retry_due": failed_run_retry_due,
             "gated_off_retry_due": gated_off_retry_due,
             "gated_off_run_has_new_rows": gated_off_run_has_new_rows,
+            "gated_off_run_new_shadow_rows": gated_off_run_new_shadow_rows,
+            "gated_off_run_min_new_rows_reached": (
+                gated_off_run_min_new_rows_reached
+            ),
             "failed_retry_backoff_secs": failed_retry_backoff_secs,
             "last_run_status": last_manifest_status or None,
             "last_run_promotion_state": last_run_promotion_state or None,
