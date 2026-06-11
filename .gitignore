@@ -28,5 +28,6 @@ logs/**
 **logs/**
 
 # runtime artifacts and feedback snapshots
+data
 data/
 reports/
