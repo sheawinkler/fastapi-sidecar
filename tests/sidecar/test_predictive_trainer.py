@@ -2304,6 +2304,51 @@ def test_status_payload_overlays_active_run_on_cached_idle_snapshot(tmp_path: Pa
     assert health["scheduler_trigger"]["reason"] == "already_running"
 
 
+def test_live_payloads_compact_active_run_model_audit(tmp_path: Path):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+    run_id = "run-compact-active"
+    audit = [
+        {"mint": "mint-a", "net_sol": 0.001, "notes": "x" * 1000},
+        {"mint": "mint-b", "net_sol": -0.002, "notes": "y" * 1000},
+    ]
+    manager._active_run_id = run_id
+
+    class _NeverDoneTask:
+        def done(self) -> bool:
+            return False
+
+    manager._current_task = _NeverDoneTask()
+    manager._write_manifest(
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "running",
+            "stage": "dataset",
+            "stage_message": "building training dataset",
+            "active_model": {
+                "trained_at": "2026-04-07T00:00:00Z",
+                "raw_shadow_entry_count": 123,
+                "executed_prior_audit": audit,
+            },
+        },
+    )
+
+    status = manager.status_payload()
+    health = manager.health_payload()
+    deep_active = manager._manifest_for_status(
+        run_id, manager._read_manifest(run_id), compact=False
+    )
+
+    assert status["active_run_stage"] == "dataset"
+    assert status["active_run"]["active_model"]["trained_at"] == (
+        "2026-04-07T00:00:00Z"
+    )
+    assert "executed_prior_audit" not in status["active_run"]["active_model"]
+    assert health["active_run"]["active_model"]["raw_shadow_entry_count"] == 123
+    assert "executed_prior_audit" not in health["active_run"]["active_model"]
+    assert deep_active["active_model"]["executed_prior_audit"] == audit
+
+
 def test_health_payload_deep_reports_active_run_stage(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     run_id = "run-deep-health-active"

@@ -1065,6 +1065,75 @@ class PredictiveTrainerManager:
             "model_freshness_state": "snapshot_not_ready",
         }
 
+    def _compact_active_model_payload(
+        self, model: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if model is None:
+            return None
+        compact_keys = (
+            "model_path",
+            "training_path",
+            "calibration_path",
+            "next_state_ledger_path",
+            "model_read_error",
+            "training_read_error",
+            "calibration_read_error",
+            "training_rows",
+            "shadow_rows",
+            "raw_shadow_entry_count",
+            "executed_rows",
+            "positive_rows",
+            "negative_rows",
+            "trained_at",
+            "selected_shadow_row_count",
+            "selected_executed_row_count",
+            "selected_total_training_rows",
+            "shadow_corpus_instance_id",
+            "shadow_corpus_created_at",
+            "shadow_corpus_family_id",
+            "shadow_corpus_entry_count",
+            "shadow_corpus_last_seq",
+            "shadow_corpus_snapshot_sha256",
+            "shadow_corpus_durability_state",
+            "version",
+            "calibration_global_mae_sol",
+            "p_positive_after_cost_brier",
+            "calibration_rows",
+        )
+        return {key: model.get(key) for key in compact_keys if key in model}
+
+    def _compact_run_manifest_payload(
+        self, manifest: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if manifest is None:
+            return None
+        payload = dict(manifest)
+        active_model = payload.get("active_model")
+        if isinstance(active_model, dict):
+            payload["active_model"] = self._compact_active_model_payload(active_model)
+        candidate_model = payload.get("candidate_model")
+        if isinstance(candidate_model, dict):
+            payload["candidate_model"] = self._compact_active_model_payload(
+                candidate_model
+            )
+        for key in (
+            "candidate_attestation",
+            "candidate_training",
+            "executed_prior_audit",
+        ):
+            payload.pop(key, None)
+        return payload
+
+    def _compact_live_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        compact = dict(payload)
+        active_model = compact.get("active_model")
+        if isinstance(active_model, dict):
+            compact["active_model"] = self._compact_active_model_payload(active_model)
+        active_run = compact.get("active_run")
+        if isinstance(active_run, dict):
+            compact["active_run"] = self._compact_run_manifest_payload(active_run)
+        return compact
+
     def _snapshot_metadata(self, *, state: str, error: str | None) -> dict[str, Any]:
         age_secs: float | None = None
         if self._snapshot_updated_monotonic is not None:
@@ -2193,16 +2262,20 @@ class PredictiveTrainerManager:
         return manifest
 
     def _manifest_for_status(
-        self, run_id: str, manifest: dict[str, Any] | None
+        self, run_id: str, manifest: dict[str, Any] | None, *, compact: bool = False
     ) -> dict[str, Any] | None:
         if manifest is None:
             return None
         payload = dict(manifest)
         payload.setdefault("log_paths", self._run_log_paths(run_id))
         payload.update(self._artifact_existence_flags(run_id))
+        if compact:
+            return self._compact_run_manifest_payload(payload)
         return payload
 
-    def _active_run_status_overlay(self) -> dict[str, Any] | None:
+    def _active_run_status_overlay(
+        self, *, compact: bool = False
+    ) -> dict[str, Any] | None:
         if not self.is_running() or not self._active_run_id:
             return None
         run_id = self._active_run_id
@@ -2211,7 +2284,7 @@ class PredictiveTrainerManager:
             manifest.get("status")
         ):
             return None
-        active_run = self._manifest_for_status(run_id, manifest)
+        active_run = self._manifest_for_status(run_id, manifest, compact=compact)
         return {
             "status": "running",
             "is_running": True,
@@ -2224,8 +2297,8 @@ class PredictiveTrainerManager:
             "model_freshness_state": "running_catching_up",
         }
 
-    def _active_run_health_overlay(self) -> dict[str, Any]:
-        active_overlay = self._active_run_status_overlay()
+    def _active_run_health_overlay(self, *, compact: bool = False) -> dict[str, Any]:
+        active_overlay = self._active_run_status_overlay(compact=compact)
         if not active_overlay:
             return {
                 "active_run_id": None,
@@ -4652,7 +4725,7 @@ class PredictiveTrainerManager:
             "scheduler_runtime": self._scheduler_runtime_payload(),
             "scheduler_trigger": self._scheduler_trigger_payload(),
             **freshness,
-            **self._active_run_health_overlay(),
+            **self._active_run_health_overlay(compact=False),
         }
         if payload["is_running"]:
             payload["model_freshness_state"] = "running_catching_up"
@@ -4702,12 +4775,12 @@ class PredictiveTrainerManager:
 
     def health_payload(self) -> dict[str, Any]:
         self._ensure_snapshot_materialized_sync()
-        payload = dict(self._health_snapshot_payload)
-        active_overlay = self._active_run_status_overlay()
+        payload = self._compact_live_payload(dict(self._health_snapshot_payload))
+        active_overlay = self._active_run_status_overlay(compact=True)
         if active_overlay:
             payload["is_running"] = True
             payload["model_freshness_state"] = "running_catching_up"
-            payload.update(self._active_run_health_overlay())
+            payload.update(self._active_run_health_overlay(compact=True))
             self._suppress_scheduler_trigger_while_running(payload)
         payload.update(
             self._snapshot_metadata(
@@ -4719,8 +4792,8 @@ class PredictiveTrainerManager:
 
     def status_payload(self) -> dict[str, Any]:
         self._ensure_snapshot_materialized_sync()
-        payload = dict(self._status_snapshot_payload)
-        active_overlay = self._active_run_status_overlay()
+        payload = self._compact_live_payload(dict(self._status_snapshot_payload))
+        active_overlay = self._active_run_status_overlay(compact=True)
         if active_overlay:
             payload.update(active_overlay)
             self._suppress_scheduler_trigger_while_running(payload)
