@@ -2304,6 +2304,29 @@ def test_status_payload_overlays_active_run_on_cached_idle_snapshot(tmp_path: Pa
     assert health["scheduler_trigger"]["reason"] == "already_running"
 
 
+def test_health_and_status_payload_can_skip_initial_materialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    manager = PredictiveTrainerManager(_make_config(tmp_path))
+
+    def _fail_deep_snapshot():
+        raise AssertionError("deep snapshot should stay off the normal request path")
+
+    monkeypatch.setattr(
+        manager, "_build_deep_snapshot_payloads_sync", _fail_deep_snapshot
+    )
+
+    health = manager.health_payload(materialize=False)
+    status = manager.status_payload(materialize=False)
+
+    assert health["status"] == "ok"
+    assert health["snapshot_state"] == "bootstrapping"
+    assert health["scheduler_trigger"]["reason"] == "snapshot_not_ready"
+    assert status["status"] == "idle"
+    assert status["snapshot_state"] == "bootstrapping"
+    assert status["scheduler_trigger"]["reason"] == "snapshot_not_ready"
+
+
 def test_live_payloads_compact_active_run_model_audit(tmp_path: Path):
     manager = PredictiveTrainerManager(_make_config(tmp_path))
     run_id = "run-compact-active"

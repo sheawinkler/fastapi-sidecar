@@ -486,11 +486,19 @@ def test_predict_applies_calibrator_when_present(tmp_path: Path, monkeypatch: py
 
 def test_trainer_endpoints_are_exposed(sidecar_server_module, monkeypatch: pytest.MonkeyPatch):
     class _DummyTrainer:
-        def health_payload(self):
-            return {"status": "ok", "scheduler_enabled": False}
+        def health_payload(self, *, materialize: bool = True):
+            return {
+                "status": "ok",
+                "scheduler_enabled": False,
+                "materialize": materialize,
+            }
 
-        def status_payload(self):
-            return {"status": "idle", "active_run_id": None}
+        def status_payload(self, *, materialize: bool = True):
+            return {
+                "status": "idle",
+                "active_run_id": None,
+                "materialize": materialize,
+            }
 
         def history_payload(self, limit: int = 25):
             return {"history": [{"event": "trainer_run_completed"}], "limit": limit}
@@ -526,8 +534,10 @@ def test_trainer_endpoints_are_exposed(sidecar_server_module, monkeypatch: pytes
 
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
+    assert health.json()["materialize"] is False
     assert status.status_code == 200
     assert status.json()["status"] == "idle"
+    assert status.json()["materialize"] is False
     assert history.status_code == 200
     assert history.json()["history"][0]["event"] == "trainer_run_completed"
     assert trigger.status_code == 200

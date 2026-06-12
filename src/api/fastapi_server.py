@@ -1277,7 +1277,7 @@ async def health() -> Dict[str, Any]:
             "inference_cache_ttl_seconds": _INFERENCE_CACHE_TTL_SECONDS,
         },
         "inference_backend": _inference_backend.status_dict(),
-        "trainer": _trainer_manager.health_payload(),
+        "trainer": _trainer_manager.health_payload(materialize=False),
     }
 
     if mode == "stub":
@@ -1742,7 +1742,7 @@ async def telemetry() -> TelemetryState:
 
 @app.get("/trainer/health")
 async def trainer_health() -> Dict[str, Any]:
-    return _trainer_manager.health_payload()
+    return _trainer_manager.health_payload(materialize=False)
 
 
 @app.get("/trainer/health/deep")
@@ -1752,7 +1752,7 @@ async def trainer_health_deep() -> Dict[str, Any]:
 
 @app.get("/trainer/status")
 async def trainer_status() -> Dict[str, Any]:
-    return _trainer_manager.status_payload()
+    return _trainer_manager.status_payload(materialize=False)
 
 
 @app.get("/trainer/status/deep")
