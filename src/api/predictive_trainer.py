@@ -4773,8 +4773,9 @@ class PredictiveTrainerManager:
             **freshness,
         }
 
-    def health_payload(self) -> dict[str, Any]:
-        self._ensure_snapshot_materialized_sync()
+    def health_payload(self, *, materialize: bool = True) -> dict[str, Any]:
+        if materialize:
+            self._ensure_snapshot_materialized_sync()
         payload = self._compact_live_payload(dict(self._health_snapshot_payload))
         active_overlay = self._active_run_status_overlay(compact=True)
         if active_overlay:
@@ -4790,8 +4791,9 @@ class PredictiveTrainerManager:
         )
         return payload
 
-    def status_payload(self) -> dict[str, Any]:
-        self._ensure_snapshot_materialized_sync()
+    def status_payload(self, *, materialize: bool = True) -> dict[str, Any]:
+        if materialize:
+            self._ensure_snapshot_materialized_sync()
         payload = self._compact_live_payload(dict(self._status_snapshot_payload))
         active_overlay = self._active_run_status_overlay(compact=True)
         if active_overlay:
