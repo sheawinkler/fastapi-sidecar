@@ -118,12 +118,14 @@ def test_custom_export_backend_predicts_from_json(tmp_path: Path):
     assert len(out["probabilities"]) == 5
 
 
-def test_stub_runtime_routes_to_stub_predictor():
+def test_stub_runtime_routes_to_stub_predictor(tmp_path: Path):
     mod = _runtime_module()
     runtime = mod.InferenceBackendRuntime(
         DummyStubEnsemble(),
         DummyStubEnsemble,
         requested_backend="coreml",
+        coreml_model_path=tmp_path / "missing.mlpackage",
+        custom_export_path=tmp_path / "missing.json",
     )
 
     status = runtime.status_dict()
