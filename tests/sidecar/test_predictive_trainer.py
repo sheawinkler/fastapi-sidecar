@@ -82,6 +82,10 @@ def _write_runtime_shadow_rows(
         CREATE INDEX IF NOT EXISTS telemetry_queue_file_name_timestamp_idx
         ON telemetry_queue(file_name, timestamp_ms DESC)
         """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS telemetry_queue_kind_timestamp_idx
+        ON telemetry_queue(kind, timestamp_ms DESC)
+        """)
     conn.execute("DELETE FROM telemetry_queue")
     rows = [
         (
@@ -1150,6 +1154,46 @@ def test_scheduler_trigger_uses_runtime_analytics_shadow_source(tmp_path: Path):
     assert trigger["should_start"] is True
     assert trigger["requested_by"] == "scheduler_row_threshold"
     assert trigger["row_threshold_reached"] is True
+
+
+def test_runtime_analytics_shadow_stats_refresh_uses_cached_increment(
+    tmp_path: Path,
+):
+    runtime_db = tmp_path / "runtime_analytics.sqlite"
+    config = replace(
+        _make_config(tmp_path),
+        shadow_source="runtime_analytics",
+        runtime_analytics_db_path=runtime_db,
+    )
+    runtime_instance_id = f"runtime_analytics:{runtime_db}"
+    config.scheduler_state_path.parent.mkdir(parents=True, exist_ok=True)
+    config.scheduler_state_path.write_text(
+        json.dumps(
+            {
+                "current_shadow_entry_count": 3,
+                "shadow_corpus_created_at": "1970-01-01T00:00:01Z",
+                "shadow_corpus_family_id": SHADOW_CORPUS_FAMILY_ID,
+                "shadow_corpus_instance_id": runtime_instance_id,
+                "shadow_corpus_last_seq": 1002,
+                "shadow_index_count_refreshed_at": "2026-04-07T00:00:00Z",
+                "shadow_index_last_seq": 1002,
+                "shadow_index_probe_state": "available",
+                "shadow_index_source": "runtime_analytics",
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_runtime_shadow_rows(runtime_db, 5)
+
+    manager = PredictiveTrainerManager(config)
+    payload = manager._refresh_shadow_index_stats_cache_sync()
+
+    assert payload["shadow_index_source"] == "runtime_analytics"
+    assert payload["shadow_index_incremental"] is True
+    assert payload["shadow_index_incremental_base_count"] == 3
+    assert payload["shadow_index_incremental_delta_count"] == 2
+    assert payload["current_shadow_entry_count"] == 5
+    assert payload["shadow_index_last_seq"] == 1004
 
 
 def test_runtime_analytics_source_ignores_stale_cached_sqlite_count(tmp_path: Path):

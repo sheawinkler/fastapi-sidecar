@@ -34,6 +34,7 @@ RUNTIME_ANALYTICS_PREDICTIVE_FIREHOSE_FILE_PREFIX = (
     "arena__outcomes__predictive_candidate_firehose_"
 )
 RUNTIME_ANALYTICS_FILE_NAME_TIMESTAMP_INDEX = "telemetry_queue_file_name_timestamp_idx"
+RUNTIME_ANALYTICS_KIND_TIMESTAMP_INDEX = "telemetry_queue_kind_timestamp_idx"
 
 
 class PromotionGateBlockedError(RuntimeError):
@@ -369,11 +370,14 @@ def _read_shadow_sqlite_stats(path: Path) -> dict[str, Any]:
         conn.close()
 
 
-def _read_runtime_shadow_stats(path: Path) -> dict[str, Any]:
+def _read_runtime_shadow_stats(
+    path: Path, cached: dict[str, Any] | None = None
+) -> dict[str, Any]:
     payload = _default_shadow_index_stats_cache()
     payload["shadow_index_count_cached"] = False
     payload["shadow_index_source"] = "runtime_analytics"
-    payload["shadow_corpus_instance_id"] = f"runtime_analytics:{path}"
+    corpus_instance_id = f"runtime_analytics:{path}"
+    payload["shadow_corpus_instance_id"] = corpus_instance_id
     payload["shadow_corpus_family_id"] = SHADOW_CORPUS_FAMILY_ID
     if not path.exists():
         payload["shadow_index_count_error"] = "runtime_analytics_missing"
@@ -402,33 +406,82 @@ def _read_runtime_shadow_stats(path: Path) -> dict[str, Any]:
             )
             payload["shadow_index_count_refreshed_at"] = _utc_iso()
             return payload
-        index_present = conn.execute(
+        file_index_present = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ? LIMIT 1",
             (RUNTIME_ANALYTICS_FILE_NAME_TIMESTAMP_INDEX,),
         ).fetchone()
-        index_hint = (
-            f" INDEXED BY {RUNTIME_ANALYTICS_FILE_NAME_TIMESTAMP_INDEX}"
-            if index_present
-            else ""
-        )
-        row = conn.execute(
-            f"""
-            SELECT COUNT(*), MIN(timestamp_ms), MAX(timestamp_ms)
-            FROM telemetry_queue{index_hint}
-            WHERE file_name GLOB ? AND kind = ?
-            """,
-            (
-                f"{RUNTIME_ANALYTICS_PREDICTIVE_FIREHOSE_FILE_PREFIX}*",
-                RUNTIME_ANALYTICS_ARENA_KIND,
-            ),
+        kind_ts_index_present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ? LIMIT 1",
+            (RUNTIME_ANALYTICS_KIND_TIMESTAMP_INDEX,),
         ).fetchone()
-        entry_count = _safe_int((row or [0])[0], 0)
-        first_ts_ms = (row or [None, None, None])[1]
-        last_ts_ms = (row or [None, None, None])[2]
+
+        cached_payload = cached if isinstance(cached, dict) else {}
+        cached_count = _safe_int(cached_payload.get("current_shadow_entry_count"), 0)
+        cached_last_seq = _safe_int(
+            cached_payload.get("shadow_corpus_last_seq")
+            or cached_payload.get("shadow_index_last_seq"),
+            0,
+        )
+        cached_source = str(cached_payload.get("shadow_index_source") or "").strip()
+        cached_instance = str(cached_payload.get("shadow_corpus_instance_id") or "").strip()
+        cache_usable = (
+            bool(kind_ts_index_present)
+            and cached_source == "runtime_analytics"
+            and cached_instance == corpus_instance_id
+            and cached_count > 0
+            and cached_last_seq > 0
+        )
+
+        if cache_usable:
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*), MIN(timestamp_ms), MAX(timestamp_ms)
+                FROM telemetry_queue INDEXED BY {RUNTIME_ANALYTICS_KIND_TIMESTAMP_INDEX}
+                WHERE kind = ? AND timestamp_ms > ? AND file_name GLOB ?
+                """,
+                (
+                    RUNTIME_ANALYTICS_ARENA_KIND,
+                    cached_last_seq,
+                    f"{RUNTIME_ANALYTICS_PREDICTIVE_FIREHOSE_FILE_PREFIX}*",
+                ),
+            ).fetchone()
+            delta_count = _safe_int((row or [0])[0], 0)
+            first_ts_ms = (row or [None, None, None])[1]
+            last_ts_ms = (row or [None, None, None])[2] or cached_last_seq
+            entry_count = cached_count + delta_count
+            payload["shadow_index_incremental"] = True
+            payload["shadow_index_incremental_base_count"] = cached_count
+            payload["shadow_index_incremental_delta_count"] = delta_count
+            payload["shadow_corpus_created_at"] = (
+                cached_payload.get("shadow_corpus_created_at")
+                or _iso_from_epoch_ms(first_ts_ms)
+            )
+        else:
+            index_hint = (
+                f" INDEXED BY {RUNTIME_ANALYTICS_FILE_NAME_TIMESTAMP_INDEX}"
+                if file_index_present
+                else ""
+            )
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*), MIN(timestamp_ms), MAX(timestamp_ms)
+                FROM telemetry_queue{index_hint}
+                WHERE file_name GLOB ? AND kind = ?
+                """,
+                (
+                    f"{RUNTIME_ANALYTICS_PREDICTIVE_FIREHOSE_FILE_PREFIX}*",
+                    RUNTIME_ANALYTICS_ARENA_KIND,
+                ),
+            ).fetchone()
+            entry_count = _safe_int((row or [0])[0], 0)
+            first_ts_ms = (row or [None, None, None])[1]
+            last_ts_ms = (row or [None, None, None])[2]
+            payload["shadow_index_incremental"] = False
+            payload["shadow_corpus_created_at"] = _iso_from_epoch_ms(first_ts_ms)
+
         payload["current_shadow_entry_count"] = entry_count
         payload["shadow_index_last_seq"] = _safe_int(last_ts_ms, 0)
         payload["shadow_index_last_write_at"] = _iso_from_epoch_ms(last_ts_ms)
-        payload["shadow_corpus_created_at"] = _iso_from_epoch_ms(first_ts_ms)
         payload["shadow_corpus_last_seq"] = _safe_int(last_ts_ms, 0)
         payload["shadow_index_count_refreshed_at"] = _utc_iso()
         payload["shadow_index_count_error"] = None
@@ -923,7 +976,10 @@ class PredictiveTrainerManager:
 
     def _read_shadow_stats_sync(self) -> dict[str, Any]:
         if self._shadow_stats_source() == "runtime_analytics":
-            return _read_runtime_shadow_stats(self._shadow_stats_path())
+            return _read_runtime_shadow_stats(
+                self._shadow_stats_path(),
+                getattr(self, "_shadow_index_stats_cache", None),
+            )
         return _read_shadow_sqlite_stats(self.config.shadow_sqlite_path)
 
     def set_guidance_subscriber_count_provider(
